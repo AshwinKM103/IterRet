@@ -1,9 +1,16 @@
+"""Real-time rubric-based scoring for closed-loop steps.
+
+Evaluates Planning and Reflection decisions during episodes using COLM rubric
+dimensions (COLM §1.4.2).
+"""
+
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
-from .json_utils import parse_json_object
-from .llm_client import LLMClient
+from ..models.llm_client import LLMClient
+from ..utils.json_utils import parse_json_object
 
 COLM_RUBRIC_DIMENSIONS = [
     "query specificity",
@@ -27,7 +34,8 @@ def _sum_rubric_scores(rubrics: dict[str, object], dimensions: list[str]) -> int
     total = 0
     for dimension in dimensions:
         try:
-            total += int(rubrics.get(dimension, 0))
+            value = rubrics.get(dimension, 0)
+            total += int(cast(Any, value))
         except (TypeError, ValueError):
             continue
     return total
@@ -64,7 +72,7 @@ def score_reflect_step(
     rubrics = parsed.get("rubrics", {})
     if not isinstance(rubrics, dict):
         rubrics = {}
-    per_dimension = {}
+    per_dimension: dict[str, int] = {}
     for dimension in COLM_RUBRIC_DIMENSIONS:
         score = rubrics.get(dimension, 0)
         try:

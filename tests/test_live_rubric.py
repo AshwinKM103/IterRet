@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from iterret.live_rubric import COLM_RUBRIC_DIMENSIONS, score_reflect_step
-from iterret.llm_client import LLMClient
+from iterret.memory.live_rubric import COLM_RUBRIC_DIMENSIONS, score_reflect_step
+from iterret.models.llm_client import LLMClient
 
 
 class StubLLMClient(LLMClient):

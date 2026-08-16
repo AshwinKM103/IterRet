@@ -4,18 +4,18 @@ from functools import partial
 
 from langgraph.graph import END, StateGraph
 
-from .config import TraversalLimits
-from .ctc_graph import CueTagContentGraph
+from ..config import TraversalLimits
+from ..data.ctc_graph import CueTagContentGraph
+from ..models.llm_client import LLMClient
+from ..state import IterRetState
 from .experience_bank import ExperienceBank
-from .llm_client import LLMClient
 from .nodes import (
     answer_node,
     reflect_node,
     retrieve_node,
     route_after_reflect,
-    route_passthrough_node,
+    router_node,
 )
-from .state import IterRetState
 
 
 def build_graph(
@@ -30,7 +30,7 @@ def build_graph(
         "retrieve", partial(retrieve_node, graph=graph, bank=bank, llm=llm, limits=limits)
     )
     workflow.add_node("reflect", partial(reflect_node, graph=graph, bank=bank, llm=llm))
-    workflow.add_node("route", route_passthrough_node)
+    workflow.add_node("route", partial(router_node, llm=llm, bank=bank))
     workflow.add_node("answer", partial(answer_node, llm=llm))
 
     workflow.set_entry_point("retrieve")

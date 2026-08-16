@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from iterret.evidence_tracker import EvidenceTracker
+from iterret.memory.evidence_tracker import EvidenceTracker
 
 
 def test_add_evidence_deduplicates() -> None:

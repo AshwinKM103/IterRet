@@ -1,3 +1,9 @@
+"""LLM client abstraction for IterRet.
+
+Provides pluggable LLM backends: OpenAI-compatible endpoints (vLLM, LM Studio,
+Ollama), and a deterministic mock for testing and offline trajectory collection.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,17 +22,55 @@ ENV_LLM_MODEL = "ITERRET_LLM_MODEL"
 
 
 def resolve_llm_base_url(cli_value: str | None = None) -> str:
+    """Resolve the LLM endpoint URL.
+
+    Priority: CLI value > environment variable > default.
+
+    Args:
+        cli_value: Value passed on CLI (e.g., via Hydra config override).
+
+    Returns:
+        The resolved base URL.
+    """
     return cli_value or os.environ.get(ENV_LLM_BASE_URL) or DEFAULT_LLM_BASE_URL
 
 
 def resolve_llm_model(cli_value: str | None = None) -> str:
+    """Resolve the LLM model name.
+
+    Priority: CLI value > environment variable > default.
+
+    Args:
+        cli_value: Value passed on CLI (e.g., via Hydra config override).
+
+    Returns:
+        The resolved model name.
+    """
     return cli_value or os.environ.get(ENV_LLM_MODEL) or DEFAULT_LLM_MODEL
 
 
 class LLMClient(ABC):
+    """Abstract base class for LLM implementations.
+
+    All implementations must support the chat interface for condition abstraction,
+    cue extraction, routing, and other decision steps in the closed loop.
+    """
+
     @abstractmethod
     def chat(self, system_prompt: str, user_prompt: str, *, temperature: float = 0.0) -> str:
-        """Return the raw text content of the model's reply."""
+        """Send a chat message and return the model's response.
+
+        Args:
+            system_prompt: The system role prompt.
+            user_prompt: The user message.
+            temperature: Sampling temperature (default 0.0).
+
+        Returns:
+            The raw text content of the model's reply.
+
+        Raises:
+            RuntimeError or similar if the backend cannot process the request.
+        """
 
 
 class OpenAICompatibleLLMClient(LLMClient):
@@ -44,6 +88,18 @@ class OpenAICompatibleLLMClient(LLMClient):
         api_key: str = "not-needed",
         max_tokens: int = 1024,
     ) -> None:
+        """Initialize an OpenAI-compatible LLM client.
+
+        Never raises on construction (lazy loading): only the first call to
+        chat() will surface missing dependencies or connection failures.
+
+        Args:
+            base_url: Base URL of the OpenAI-compatible endpoint
+                (resolves from ITERRET_LLM_BASE_URL or default).
+            model: Model name (resolves from ITERRET_LLM_MODEL or default).
+            api_key: API authentication key (default "not-needed" for local vLLM).
+            max_tokens: Maximum tokens in response (default 1024).
+        """
         self.base_url = resolve_llm_base_url(base_url)
         self.model = resolve_llm_model(model)
         self.api_key = api_key
@@ -58,6 +114,19 @@ class OpenAICompatibleLLMClient(LLMClient):
             self._client = None
 
     def chat(self, system_prompt: str, user_prompt: str, *, temperature: float = 0.0) -> str:
+        """Send a chat message and return the model's response.
+
+        Args:
+            system_prompt: The system prompt (role: system).
+            user_prompt: The user message (role: user).
+            temperature: Sampling temperature (default 0.0 for deterministic).
+
+        Returns:
+            The raw text content of the model's response.
+
+        Raises:
+            RuntimeError: If the openai package is missing or endpoint unreachable.
+        """
         if self._client is None:
             raise RuntimeError(
                 "OpenAICompatibleLLMClient has no usable client (the `openai` package is "
@@ -91,6 +160,8 @@ class MockLLMClient(LLMClient):
 
         if "situation_abstraction" in text:
             return self._situation_reply(user_prompt)
+        if "cue_extraction" in text:
+            return self._cue_extraction_reply(user_prompt)
         if "action_selection" in text:
             return self._action_selection_reply(user_prompt)
         if "routing_and_reflection" in text:
@@ -120,6 +191,23 @@ class MockLLMClient(LLMClient):
         except (json.JSONDecodeError, AttributeError):
             condition = user_prompt
         return json.dumps({"situation": f"a query situation abstracted from: {condition[:60]}"})
+
+    def _cue_extraction_reply(self, user_prompt: str) -> str:
+        try:
+            payload = json.loads(user_prompt)
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        query = str(payload.get("query", ""))
+        gaps = payload.get("gaps", [])
+        terms = [word for word in query.split() if len(word) > 3]
+        for gap in gaps:
+            terms.extend(word for word in str(gap).split() if len(word) > 3)
+        seen, deduped = set(), []
+        for term in terms:
+            if term not in seen:
+                seen.add(term)
+                deduped.append(term)
+        return json.dumps({"cues": deduped[:10]})
 
     def _action_selection_reply(self, user_prompt: str) -> str:
         actions = ["cue_to_tag", "tag_to_content"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from iterret.evaluator import (
+from iterret.memory.evaluator import (
     HIGH_THRESHOLD,
     LOW_THRESHOLD,
     PLANNING_RUBRICS,
@@ -10,7 +10,7 @@ from iterret.evaluator import (
     classify,
     score_step,
 )
-from iterret.llm_client import LLMClient
+from iterret.models.llm_client import LLMClient
 
 
 class StubLLMClient(LLMClient):

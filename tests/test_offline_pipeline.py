@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from iterret import evaluator, offline_pipeline
-from iterret.experience_bank import ExperienceBank, KeywordOverlapEmbeddingBackend
-from iterret.llm_client import LLMClient
+from iterret.memory import evaluator, offline_pipeline
+from iterret.memory.experience_bank import ExperienceBank, KeywordOverlapEmbeddingBackend
+from iterret.models.llm_client import LLMClient
 
 
 class ScriptedLLMClient(LLMClient):
@@ -20,7 +20,7 @@ class ScriptedLLMClient(LLMClient):
         return self._replies.pop(0)
 
 
-def _step(module: str, iteration: int) -> dict:
+def _step(module: str, iteration: int, rubric_scores: dict | None = None) -> dict:
     return {
         "iteration": iteration,
         "module": module,
@@ -28,6 +28,7 @@ def _step(module: str, iteration: int) -> dict:
         "action_taken": "cue_to_tag",
         "found_summary": "found stuff",
         "decision": "retrieve" if module == "Planning" else "reflect",
+        "rubric_scores": rubric_scores or {},
     }
 
 
@@ -71,7 +72,7 @@ def test_construct_experience_banks_only_distills_flagged_steps() -> None:
     llm = ScriptedLLMClient(_scripted_replies_for_sample_records())
 
     with patch(
-        "iterret.offline_pipeline.build_default_embedding_backend",
+        "iterret.memory.offline_pipeline.build_default_embedding_backend",
         return_value=KeywordOverlapEmbeddingBackend(),
     ):
         bank = offline_pipeline.construct_experience_banks(_sample_records(), llm)
@@ -91,7 +92,7 @@ def test_construct_experience_banks_calls_add_experience_only_for_flagged_steps(
 
     with (
         patch(
-            "iterret.offline_pipeline.build_default_embedding_backend",
+            "iterret.memory.offline_pipeline.build_default_embedding_backend",
             return_value=KeywordOverlapEmbeddingBackend(),
         ),
         patch.object(
@@ -101,3 +102,34 @@ def test_construct_experience_banks_calls_add_experience_only_for_flagged_steps(
         offline_pipeline.construct_experience_banks(_sample_records(), llm)
 
     assert mocked.call_count == 2  # step 0 (good) and step 1 (bad); step 2 (discard) never calls it
+
+
+def test_construct_experience_banks_forwards_live_rubric_scores_to_learner() -> None:
+    """Fix 2: live COLM-dimension rubric scores computed during Reflect
+    (already stored on the trajectory step, previously discarded) must
+    reach the learner's distillation call, not just the offline 8-dimension
+    evaluator."""
+    live_scores = {"query specificity": 3, "evidence coverage": 2, "gap-gap redundancy": 0}
+    records = [
+        {
+            "original_query": "q",
+            "final_evidence": ["ev1"],
+            "steps": [_step("Reflection", 0, rubric_scores=live_scores)],
+        }
+    ]
+    llm = ScriptedLLMClient(
+        [
+            _rubric_reply("Reflection", 3, "great reflection"),  # evaluator: 4x3=12 -> "good"
+            _distill_reply("s1", "e1"),  # learner
+        ]
+    )
+
+    with patch(
+        "iterret.memory.offline_pipeline.build_default_embedding_backend",
+        return_value=KeywordOverlapEmbeddingBackend(),
+    ):
+        offline_pipeline.construct_experience_banks(records, llm)
+
+    distill_call = llm.calls[-1]
+    sent = json.loads(distill_call[1])
+    assert sent["live_rubric_scores"] == live_scores

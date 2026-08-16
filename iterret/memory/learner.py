@@ -1,11 +1,17 @@
+"""Learning experiences from trajectories for the experience bank.
+
+Distills past closed-loop steps into training examples for the Planning and
+Reflection experience banks (R2-Mem learning phase).
+"""
+
 from __future__ import annotations
 
 import json
 
+from ..models.llm_client import LLMClient
+from ..state import SearchStep
+from ..utils.json_utils import parse_json_object
 from .experience_bank import ExperienceEntry, Module, planning_condition, reflection_condition
-from .json_utils import parse_json_object
-from .llm_client import LLMClient
-from .state import SearchStep
 
 _HIGH_QUALITY_FRAMING = (
     "This step was judged HIGH-quality. Distill a best-practice pattern from it "
@@ -18,7 +24,13 @@ _LOW_QUALITY_FRAMING = (
 
 _DISTILL_SYSTEM_PROMPT = """experience_distillation
 You are an AI TRACE Strategist/Auditor (R2-Mem style). {framing}
-Derive a GENERALIZABLE experience from this judged trajectory step. The
+Derive a GENERALIZABLE experience from this judged trajectory step. When
+`live_rubric_scores` is present (COLM per-dimension scores -- query
+specificity, evidence coverage, gap-gap redundancy -- captured live while
+the step actually ran), use it as additional signal for which aspect of the
+step most needs reinforcing (if scores are high) or correcting (if low);
+it is not a replacement for the 8-dimension rubric_evaluation judgment
+already given, only an extra, real-time-captured perspective on it. The
 output experience must follow the form: IF <abstract situation> THEN
 <strategy>. Do not copy concrete surface facts from the trace; treat the
 diagnosed evaluation reason as authoritative supervision.
@@ -34,7 +46,7 @@ def distill_experience(
     llm: LLMClient,
     *,
     original_query: str,
-    accumulated_evidence: list,
+    accumulated_evidence: list[str],
 ) -> ExperienceEntry:
     """Second-stage Learner call (R2-Mem's Exp_Planning/Exp_Reflection).
 
@@ -53,6 +65,7 @@ def distill_experience(
             "found_summary": step["found_summary"],
             "decision": step["decision"],
             "diagnosed_reason_and_advice": reason_and_advice,
+            "live_rubric_scores": step.get("rubric_scores", {}),
         }
     )
     raw = llm.chat(system_prompt, user_prompt)

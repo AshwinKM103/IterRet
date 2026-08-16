@@ -1,11 +1,17 @@
+"""Rubric-based evaluation of closed-loop steps.
+
+Defines Planning and Reflection rubrics (COLM §1.4.2) and evaluates
+individual steps via LLM judgment.
+"""
+
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal, cast
 
-from .json_utils import parse_json_object
-from .llm_client import LLMClient
-from .state import SearchStep
+from ..models.llm_client import LLMClient
+from ..state import SearchStep
+from ..utils.json_utils import parse_json_object
 
 PLANNING_RUBRICS = [
     "Info Needs Coverage",
@@ -44,7 +50,8 @@ def _sum_rubric_scores(rubrics: dict[str, object], dimensions: list[str]) -> int
     total = 0
     for dimension in dimensions:
         try:
-            total += int(rubrics.get(dimension, 0))
+            value = rubrics.get(dimension, 0)
+            total += int(cast(Any, value))
         except (TypeError, ValueError):
             continue
     return total

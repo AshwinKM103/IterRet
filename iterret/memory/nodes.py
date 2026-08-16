@@ -1,16 +1,22 @@
+"""Closed-loop nodes: planning, retrieval, routing, and answer synthesis.
+
+Implements the four steps of COLM §1.4.3: planning_node, retrieve_node,
+routing_node (reflection), and answer_node, orchestrated by LanggraphGraphBuilder.
+"""
+
 from __future__ import annotations
 
 import json
 from typing import Literal
 
-from .config import TraversalLimits
-from .ctc_graph import CueTagContentGraph
+from ..config import TraversalLimits
+from ..data.ctc_graph import CueTagContentGraph
+from ..models.llm_client import LLMClient
+from ..state import DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_STUCK_REFLECTS, IterRetState, SearchStep
+from ..utils.json_utils import parse_json_object
 from .evidence_tracker import EvidenceTracker
 from .experience_bank import ExperienceBank, planning_condition, reflection_condition
-from .json_utils import parse_json_object
 from .live_rubric import score_reflect_step
-from .llm_client import LLMClient
-from .state import DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_STUCK_REFLECTS, IterRetState, SearchStep
 
 _SITUATION_SYSTEM_PROMPT = """situation_abstraction
 Abstract the given condition into a short, general situation description
@@ -20,10 +26,14 @@ Reply as JSON: {"situation": str}.
 
 _ACTION_SELECTION_SYSTEM_PROMPT = """action_selection
 You control traversal over a Cue-Tag-Content memory graph (MRAgent style).
-Given the query, the current active set, and any retrieved Planning
-experience advice, choose which traversal action(s) to take this round:
-"cue_to_tag", "tag_to_content", and/or "content_to_cue_tag". Also list any
-tags that should be excluded based on the experience advice.
+Given the query, the current active set, any retrieved Planning experience
+advice, and the current information_gaps (G), choose which traversal
+action(s) to take this round: "cue_to_tag", "tag_to_content", and/or
+"content_to_cue_tag". Also list any tags that should be excluded --
+"exclude_tags" is how paths get pruned BEFORE their content is loaded, so
+exclude any tag whose likely content is inconsistent with (i.e. unlikely to
+help resolve) information_gaps, not just tags the experience advice warns
+against.
 In most rounds you should select BOTH "cue_to_tag" AND "tag_to_content"
 together: activating tags without then fetching the content behind them
 makes no progress and wastes a round. The active_set's tags/cues are
@@ -32,6 +42,15 @@ expected) for later entries to look unrelated -- do not let that stop you
 from selecting "tag_to_content" once any clearly relevant tag is present.
 Only select "cue_to_tag" alone if there are currently no tags at all yet.
 Reply as JSON: {"actions": [str, ...], "exclude_tags": [str, ...]}.
+"""
+
+_CUE_EXTRACTION_SYSTEM_PROMPT = """cue_extraction
+Given the current query, the evidence gathered so far, and the remaining
+information gaps, extract retrieval cue terms -- named entities, time
+expressions, and causal predicates -- worth indexing into a Cue-Tag-Content
+memory graph for the NEXT retrieval round. Prioritize terms tied to the
+unresolved gaps, not just the original query text.
+Reply as JSON: {"cues": [str, ...]}.
 """
 
 _ROUTING_SYSTEM_PROMPT = """routing_and_reflection
@@ -60,6 +79,153 @@ def abstract_situation(condition: str, llm: LLMClient) -> str:
     return parse_json_object(raw).get("situation") or condition
 
 
+def extract_cue_terms(
+    query: str, evidence: list[str], gaps: list[str], llm: LLMClient
+) -> list[str]:
+    """LLM-based cue extraction (COLM §1.4.3 step 1), re-run every retrieval
+    round against the current (E, G) state rather than the query alone.
+    Mirrors MRAgent's `extract_question_keys` (agent/agent.py:566-572). The
+    returned terms are matched against the graph's actual cue ids by the
+    caller (see `_refresh_active_cues`) via lexical subset matching -- an
+    LLM can't be trusted to emit ids that exist verbatim in the graph, so
+    its raw output text is fed into that matcher rather than applied
+    directly as cue ids.
+    """
+    raw = llm.chat(
+        _CUE_EXTRACTION_SYSTEM_PROMPT,
+        json.dumps({"query": query, "evidence": evidence, "gaps": gaps}),
+    )
+    parsed = parse_json_object(raw)
+    terms = parsed.get("cues", [])
+    if not isinstance(terms, list):
+        return []
+    return [str(term) for term in terms if isinstance(term, (str, int, float))]
+
+
+def _refresh_active_cues(
+    query: str,
+    evidence: list[str],
+    gaps: list[str],
+    graph: CueTagContentGraph,
+    llm: LLMClient,
+    limits: TraversalLimits,
+    active_set: dict[str, list[str]],
+) -> None:
+    """CTC Step 1 (COLM §1.4.3 step 1): re-derive retrieval cues from the
+    current evidence-gap state (E, G) every round -- not a one-shot,
+    query-only match. Newly-matched cues are UNIONed with cues already in
+    the active set (not reset), so cues discovered in earlier rounds are
+    never lost.
+    """
+    cue_terms = extract_cue_terms(query, evidence, gaps, llm)
+    combined_text = " ".join([query, *cue_terms, *evidence, *gaps])
+    matched = graph.match_query_to_cues(combined_text, max_matches=limits.max_active_cues)
+    merged = sorted(set(active_set["cues"]) | matched)
+    active_set["cues"] = merged[: limits.max_active_cues]
+
+
+def _select_traversal_actions(
+    query: str,
+    active_set: dict[str, list[str]],
+    advice_text: str,
+    gaps: list[str],
+    llm: LLMClient,
+) -> tuple[list[str], set[str]]:
+    """f_select (Eq. 10): Planning-experience-guided AND gap (G)-aware --
+    `exclude_tags` is the pruning decision applied in `_prune_tags_by_gap`.
+    """
+    selection_prompt = json.dumps(
+        {
+            "query": query,
+            "active_set": active_set,
+            "planning_advice": advice_text,
+            "information_gaps": gaps,
+        }
+    )
+    raw = llm.chat(_ACTION_SELECTION_SYSTEM_PROMPT, selection_prompt)
+    parsed = parse_json_object(raw)
+    actions = parsed.get("actions") or ["cue_to_tag", "tag_to_content"]
+    exclude_tags = set(parsed.get("exclude_tags", []))
+    return actions, exclude_tags
+
+
+def _expand_tags(
+    graph: CueTagContentGraph,
+    active_set: dict[str, list[str]],
+    actions: list[str],
+    query: str,
+    limits: TraversalLimits,
+) -> set[str]:
+    """CTC Step 2 (COLM §1.4.3 step 2): tag-guided expansion -- read the
+    tags of neighboring cues and select the promising next hops."""
+    tags = set(active_set["tags"])
+    if "cue_to_tag" in actions:
+        tags |= graph.forward_cue_to_tag(active_set["cues"])
+        if len(tags) > limits.max_active_tags:
+            tags = set(graph.rank_tags_by_relevance(tags, query)[: limits.max_active_tags])
+    return tags
+
+
+def _prune_tags_by_gap(tags: set[str], exclude_tags: set[str]) -> list[str]:
+    """CTC Step 4 (COLM §1.4.3 step 4): prune hops whose tags are
+    inconsistent with the current information gap G, BEFORE their content
+    is loaded. `exclude_tags` was decided gap-aware by
+    `_select_traversal_actions` above; this is the deterministic
+    application of that judgment, and it runs strictly before
+    `_load_content`.
+    """
+    return [tag for tag in tags if tag not in exclude_tags]
+
+
+def _load_content(
+    graph: CueTagContentGraph,
+    active_set: dict[str, list[str]],
+    tags: list[str],
+    actions: list[str],
+    visited: set[str],
+    already_found: set[str],
+    query: str,
+    limits: TraversalLimits,
+) -> set[str]:
+    """CTC Step 3 (COLM §1.4.3 step 3): load the full content of the
+    pruned, surviving hops and append it to this round's candidate pool."""
+    if "tag_to_content" not in actions:
+        return set()
+    new_contents = graph.forward_tag_to_content(
+        active_set["cues"], tags, exclude_content_ids=visited | already_found
+    )
+    if len(new_contents) > limits.max_new_content_per_round:
+        new_contents = set(
+            graph.rank_contents_by_relevance(new_contents, query)[
+                : limits.max_new_content_per_round
+            ]
+        )
+    return new_contents
+
+
+def _expand_from_new_content(
+    graph: CueTagContentGraph,
+    active_set: dict[str, list[str]],
+    actions: list[str],
+    limits: TraversalLimits,
+) -> list[str]:
+    """Continuation of CTC Step 2: content already loaded (in a PRIOR inner
+    hop) can itself activate new (cue, tag) pairs (Pi_v->(c,g)); this feeds
+    those newly-discovered tags into the NEXT hop's tag-guided expansion
+    (`_expand_tags`), and mutates `active_set["cues"]` in place with any
+    newly-discovered cues, before that same hop's pruning/loading runs.
+    """
+    if "content_to_cue_tag" not in actions or not active_set["contents"]:
+        return []
+    tags: list[str] = []
+    for cue_id, tag in graph.reverse_content_to_cue_tag(active_set["contents"]):
+        if cue_id not in active_set["cues"] and len(active_set["cues"]) < limits.max_active_cues:
+            active_set["cues"].append(cue_id)
+        if tag not in tags and len(tags) < limits.max_active_tags:
+            tags.append(tag)
+    return tags
+
+
 def retrieve_node(
     state: IterRetState,
     graph: CueTagContentGraph,
@@ -67,15 +233,22 @@ def retrieve_node(
     llm: LLMClient,
     limits: TraversalLimits | None = None,
 ) -> IterRetState:
+    """The CTC traversal (COLM §1.4.3): 5 distinguishable steps --
+    (1) cue extraction, (2) tag-guided expansion, (3) content loading,
+    (4) gap-conditioned pruning (before loading), (5) evidence-triggered
+    stopping -- run as their own inner loop, returning control to the
+    outer closed-loop controller (graph.py) only once that inner loop's
+    own stopping condition is met.
+    """
     limits = limits or TraversalLimits()
     query = state.get("current_refined_query") or state["original_query"]
     active_set = state.setdefault("active_set", {"cues": [], "tags": [], "contents": []})
     visited = set(state.get("visited_content_ids", []))
+    evidence = state.get("accumulated_evidence", [])
+    gaps = state.get("information_gaps", [])
 
-    if not active_set["cues"]:
-        active_set["cues"] = sorted(
-            graph.match_query_to_cues(query, max_matches=limits.max_active_cues)
-        )
+    # Step 1: cue extraction, re-derived from (E, G) every round.
+    _refresh_active_cues(query, evidence, gaps, graph, llm, limits, active_set)
 
     # Planning experience retrieval (R2-Mem Eq. 12, c_i = q_i)
     condition = planning_condition(query)
@@ -83,58 +256,42 @@ def retrieve_node(
     advice_entries = bank.retrieve(condition, situation, module="Planning")
     advice_text = "; ".join(entry["experience"] for entry in advice_entries)
 
-    # Action selection f_select (Eq. 10), Planning-experience-guided
-    selection_prompt = json.dumps(
-        {
-            "query": query,
-            "active_set": active_set,
-            "planning_advice": advice_text,
-        }
-    )
-    raw = llm.chat(_ACTION_SELECTION_SYSTEM_PROMPT, selection_prompt)
-    parsed = parse_json_object(raw)
-    actions = parsed.get("actions") or ["cue_to_tag", "tag_to_content"]
-    exclude_tags = set(parsed.get("exclude_tags", []))
+    actions, exclude_tags = _select_traversal_actions(query, active_set, advice_text, gaps, llm)
 
-    # Controlled traversal (Eq. 11), masked against visited_content_ids (MemR3 Eq. 5)
-    new_tags = set(active_set["tags"])
-    new_contents: set = set()
-    if "cue_to_tag" in actions:
-        new_tags |= graph.forward_cue_to_tag(active_set["cues"])
-        if len(new_tags) > limits.max_active_tags:
-            new_tags = set(graph.rank_tags_by_relevance(new_tags, query)[: limits.max_active_tags])
-    if "tag_to_content" in actions:
-        new_contents |= graph.forward_tag_to_content(
-            active_set["cues"],
-            new_tags,
-            exclude_tags=exclude_tags,
-            exclude_content_ids=visited,
+    all_new_contents: set[str] = set()
+    inner_rounds = 0
+    for inner_rounds in range(1, limits.max_inner_ctc_iterations + 1):
+        # Continuation of Step 2: content loaded in the PRIOR inner hop can itself
+        # activate new (cue, tag) pairs -- fold those into this hop's cues/candidate
+        # tags before expanding, so a discovered hop is actually used the next round
+        # instead of being found one round too late to matter.
+        extra_tags = _expand_from_new_content(graph, active_set, actions, limits)
+        # Step 2: tag-guided expansion -- select promising next hops.
+        candidate_tags = _expand_tags(graph, active_set, actions, query, limits) | set(extra_tags)
+        # Step 4: prune hops inconsistent with G, BEFORE content is loaded.
+        pruned_tags = _prune_tags_by_gap(candidate_tags, exclude_tags)
+        # Step 3: load full content of the surviving hops.
+        new_contents = _load_content(
+            graph, active_set, pruned_tags, actions, visited, all_new_contents, query, limits
         )
-        if len(new_contents) > limits.max_new_content_per_round:
-            new_contents = set(
-                graph.rank_contents_by_relevance(new_contents, query)[
-                    : limits.max_new_content_per_round
-                ]
-            )
-    if "content_to_cue_tag" in actions and active_set["contents"]:
-        for cue_id, tag in graph.reverse_content_to_cue_tag(active_set["contents"]):
-            if (
-                cue_id not in active_set["cues"]
-                and len(active_set["cues"]) < limits.max_active_cues
-            ):
-                active_set["cues"].append(cue_id)
-            if len(new_tags) < limits.max_active_tags:
-                new_tags.add(tag)
 
-    # Order by relevance to the current query, not alphabetically: the whole point of capping
-    # via rank_*_by_relevance above is to put the genuinely relevant items first, and an LLM
-    # reading a long list pays the most attention to what's earliest in it -- re-sorting
-    # alphabetically here would undo that by burying e.g. "LGBTQ Support Group" behind 50+
-    # alphabetically-earlier but irrelevant tags before the model ever reads that far.
-    active_set["tags"] = graph.rank_tags_by_relevance(new_tags, query)
-    active_set["contents"] = sorted(set(active_set["contents"]) | new_contents)
+        # Order by relevance to the current query, not alphabetically: the whole point of
+        # capping via rank_*_by_relevance above is to put the genuinely relevant items
+        # first, and an LLM reading a long list pays the most attention to what's earliest
+        # in it -- re-sorting alphabetically here would undo that by burying e.g. "LGBTQ
+        # Support Group" behind 50+ alphabetically-earlier but irrelevant tags before the
+        # model ever reads that far.
+        active_set["tags"] = graph.rank_tags_by_relevance(pruned_tags, query)
+        active_set["contents"] = sorted(set(active_set["contents"]) | new_contents)
+        all_new_contents |= new_contents
 
-    state["_scratch_new_retrieval"] = graph.rank_contents_by_relevance(new_contents, query)
+        # Step 5: evidence-triggered stopping -- halt this inner CTC loop once a hop adds
+        # nothing new (or the inner budget above is exhausted), then return control to the
+        # outer closed-loop controller.
+        if not new_contents:
+            break
+
+    state["_scratch_new_retrieval"] = graph.rank_contents_by_relevance(all_new_contents, query)
     state["active_set"] = active_set
     state["iteration_count"] = state.get("iteration_count", 0) + 1
 
@@ -145,8 +302,9 @@ def retrieve_node(
             module="Planning",
             query_used=query,
             action_taken="+".join(actions)
-            + (f" (excluded tags: {sorted(exclude_tags)})" if exclude_tags else ""),
-            found_summary=f"{len(new_contents)} new content node(s)",
+            + (f" (excluded tags: {sorted(exclude_tags)})" if exclude_tags else "")
+            + f" [{inner_rounds} inner CTC step(s)]",
+            found_summary=f"{len(all_new_contents)} new content node(s)",
             decision="retrieve",
             rubric_scores={},
         )
@@ -238,25 +396,93 @@ def reflect_node(
     return state
 
 
-def route_passthrough_node(state: IterRetState) -> IterRetState:
-    """No-op node so routing has its own graph node, mirroring MemR3's
-    explicit `router` node (paper Sec. 3.4)."""
-    return state
+_ROUTER_DECISION_SYSTEM_PROMPT = """router_decision
+You are the routing decision maker in an active memory reconstruction loop.
+Given the current query, accumulated evidence, information gaps, iteration budget,
+and any retrieved experience_advice (known high-quality behaviors and known
+failure modes from past trajectories), decide whether to retrieve more evidence
+or answer now with what's available. Let experience_advice bias your decision
+when it directly speaks to a situation like this one.
+
+Choose "retrieve" if the gaps are worth chasing further given the iteration budget.
+Choose "answer" if you judge the current evidence is sufficient or the gaps are less important.
+
+Reply as JSON: {"action": "retrieve" | "answer", "reasoning": "..."}.
+"""
 
 
-def route_after_reflect(state: IterRetState) -> Literal["retrieve", "answer"]:
-    """MemR3 Algorithm 1's router policy: pure function of state, no mutation."""
+def router_node(
+    state: IterRetState, llm: LLMClient, bank: ExperienceBank | None = None
+) -> IterRetState:
+    """LLM-based routing decision: when hard-stop conditions are false,
+    ask the LLM whether to retrieve again or answer now. Hard-stop conditions
+    (iteration budget, empty gaps, consecutive stuck reflects) always override.
+
+    When ``bank`` is provided, Reflection experience advice (COLM §1.4.2:
+    known high-quality behaviors and known failure modes should bias "the
+    router's context") is retrieved and injected into the LLM decision
+    prompt -- the same `bank.retrieve(...)` call pattern used by
+    `retrieve_node`/`reflect_node`. ``bank`` is optional (defaults to
+    None, meaning "no advice") purely so callers that don't have a bank
+    handy can still invoke this node; production wiring (graph.py) always
+    passes one.
+    """
     iteration = state.get("iteration_count", 0)
     max_iterations = state.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     gaps = state.get("information_gaps", [])
     stuck = state.get("consecutive_stuck_reflects", 0)
 
+    # Hard-stop conditions override: deterministic, no LLM call
     if iteration >= max_iterations:
-        return "answer"
+        state["_router_decision"] = "answer"
+        return state
     if not gaps:
-        return "answer"
+        state["_router_decision"] = "answer"
+        return state
     if stuck >= DEFAULT_MAX_STUCK_REFLECTS:
-        return "answer"
+        state["_router_decision"] = "answer"
+        return state
+
+    # No hard-stop: ask the LLM to decide, informed by bank advice if available
+    original_query = state["original_query"]
+    evidence = state.get("accumulated_evidence", [])
+    try:
+        advice_text = ""
+        if bank is not None:
+            condition = reflection_condition(original_query, evidence)
+            situation = abstract_situation(condition, llm)
+            advice_entries = bank.retrieve(condition, situation, module="Reflection")
+            advice_text = "; ".join(entry["experience"] for entry in advice_entries)
+
+        router_prompt = json.dumps(
+            {
+                "original_query": original_query,
+                "accumulated_evidence": evidence,
+                "information_gaps": gaps,
+                "iteration": iteration,
+                "max_iterations": max_iterations,
+                "experience_advice": advice_text,
+            }
+        )
+        raw = llm.chat(_ROUTER_DECISION_SYSTEM_PROMPT, router_prompt)
+        parsed = parse_json_object(raw)
+        decision = parsed.get("action", "retrieve")
+        if decision not in ("retrieve", "answer"):
+            decision = "retrieve"
+    except Exception:
+        # LLM call (advice retrieval or the decision itself) failed; fall back to
+        # "retrieve" to keep the pipeline moving
+        decision = "retrieve"
+
+    state["_router_decision"] = decision
+    return state
+
+
+def route_after_reflect(state: IterRetState) -> Literal["retrieve", "answer"]:
+    """Read the router's decision (already computed by router_node) and return it."""
+    decision = state.get("_router_decision", "retrieve")
+    if isinstance(decision, str) and decision in ("retrieve", "answer"):
+        return decision
     return "retrieve"
 
 

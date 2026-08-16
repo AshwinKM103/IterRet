@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from iterret.learner import distill_experience
-from iterret.llm_client import LLMClient
+from iterret.memory.learner import distill_experience
+from iterret.models.llm_client import LLMClient
 
 
 class StubLLMClient(LLMClient):
@@ -105,3 +105,46 @@ def test_distill_experience_framing_differs_by_quality() -> None:
 
     assert "HIGH-quality" in good_llm.last_call[0]
     assert "LOW-quality" in bad_llm.last_call[0]
+
+
+def test_distill_experience_forwards_live_rubric_scores_when_present() -> None:
+    """Fix 2: live COLM-dimension rubric scores computed during Reflect
+    (nodes.py's score_reflect_step) must reach the distillation prompt,
+    not be silently dropped."""
+    llm = StubLLMClient(json.dumps({"situation": "s", "experience": "e"}))
+    step = _step("Reflection")
+    step["rubric_scores"] = {
+        "query specificity": 3,
+        "evidence coverage": 1,
+        "gap-gap redundancy": 2,
+    }
+
+    distill_experience(
+        step, "reason", "good", "Reflection", llm, original_query="q", accumulated_evidence=[]
+    )
+
+    sent = json.loads(llm.last_call[1])
+    assert sent["live_rubric_scores"] == {
+        "query specificity": 3,
+        "evidence coverage": 1,
+        "gap-gap redundancy": 2,
+    }
+
+
+def test_distill_experience_defaults_live_rubric_scores_to_empty_dict() -> None:
+    """Steps without rubric_scores (e.g. Planning steps, or older records)
+    must not break distillation -- default to an empty dict."""
+    llm = StubLLMClient(json.dumps({"situation": "s", "experience": "e"}))
+
+    distill_experience(
+        _step("Planning"),
+        "reason",
+        "good",
+        "Planning",
+        llm,
+        original_query="q",
+        accumulated_evidence=[],
+    )
+
+    sent = json.loads(llm.last_call[1])
+    assert sent["live_rubric_scores"] == {}

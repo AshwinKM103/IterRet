@@ -6,12 +6,7 @@ import os
 import time
 from typing import Any
 
-from iterret import evaluator
-from iterret.experience_bank import ExperienceBank
-from iterret.graph import build_graph
-from iterret.llm_client import LLMClient, MockLLMClient, OpenAICompatibleLLMClient
-from iterret.llm_judge import judge_answer
-from iterret.locomo_data import (
+from iterret.data.locomo_data import (
     CATEGORY_NAMES,
     DEFAULT_EVAL_CATEGORIES,
     LoCoMoConversation,
@@ -19,10 +14,15 @@ from iterret.locomo_data import (
     parse_conversation,
     split_bootstrap_eval,
 )
-from iterret.memory_builder import DEFAULT_MAX_CHARS_PER_CALL, build_ctc_graph_from_dialogue
-from iterret.metrics import token_f1
-from iterret.offline_pipeline import collect_trajectories, construct_experience_banks
+from iterret.data.memory_builder import DEFAULT_MAX_CHARS_PER_CALL, build_ctc_graph_from_dialogue
+from iterret.memory import evaluator
+from iterret.memory.experience_bank import ExperienceBank
+from iterret.memory.graph import build_graph
+from iterret.memory.offline_pipeline import collect_trajectories, construct_experience_banks
+from iterret.models.llm_client import LLMClient, MockLLMClient, OpenAICompatibleLLMClient
 from iterret.state import DEFAULT_MAX_ITERATIONS, new_state
+from iterret.utils.llm_judge import judge_answer
+from iterret.utils.metrics import token_f1
 
 _KNOWN_LOCOMO_PATHS = [
     "MRAgent/data/dataset_locomo.json",

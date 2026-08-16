@@ -1,0 +1,19 @@
+# Hydra multirun sweep grid, consumed by scripts/sweep.py.
+#
+# This is NOT composed into config.yaml's defaults list -- it's read
+# directly by sweep.py, which turns each entry into a `key=value` Hydra
+# override and drives one `scripts/evaluate.py -m` multirun per axis
+# combination. Keys must be dotted paths into the root config.
+#
+# Usage:
+#   python scripts/sweep.py --sweep-config config/sweep/locomo_grid.yaml
+grid:
+  experiment.bootstrap_fraction: [0.05, 0.1, 0.2]
+  experiment.max_iterations: [3, 5, 8]
+
+# Extra fixed overrides applied to every point in the grid (e.g. pin a
+# smaller eval slice so a sweep finishes in reasonable time).
+fixed_overrides:
+  experiment.max_eval_conversations: 5
+  wandb.enabled: true
+  wandb.group: locomo_grid_sweep
