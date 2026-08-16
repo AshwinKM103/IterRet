@@ -95,6 +95,8 @@ class MockLLMClient(LLMClient):
             return self._action_selection_reply(user_prompt)
         if "routing_and_reflection" in text:
             return self._routing_reply(user_prompt)
+        if "live_rubric_scoring" in text:
+            return self._live_rubric_reply(user_prompt)
         if "rubric_evaluation" in text:
             return self._evaluation_reply(user_prompt)
         if "experience_distillation" in text:
@@ -136,6 +138,20 @@ class MockLLMClient(LLMClient):
                 else [],
                 "new_gaps": [] if resolved_all else ["need more supporting detail"],
                 "next_query": "" if resolved_all else "additional supporting detail",
+            }
+        )
+
+    def _live_rubric_reply(self, user_prompt: str) -> str:
+        try:
+            dimensions = json.loads(user_prompt).get("rubric_dimensions", [])
+        except (json.JSONDecodeError, AttributeError):
+            dimensions = []
+        per_dimension_score = 2
+        rubrics = {dimension: per_dimension_score for dimension in dimensions}
+        return json.dumps(
+            {
+                "rubrics": rubrics,
+                "reason": f"mock live rubric reason for step {self._call_count}",
             }
         )
 

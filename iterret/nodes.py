@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from .config import MAX_ACTIVE_CUES, MAX_ACTIVE_TAGS, MAX_NEW_CONTENT_PER_ROUND
+from .config import TraversalLimits
 from .ctc_graph import CueTagContentGraph
+from .evidence_tracker import EvidenceTracker
 from .experience_bank import ExperienceBank, planning_condition, reflection_condition
 from .json_utils import parse_json_object
+from .live_rubric import score_reflect_step
 from .llm_client import LLMClient
 from .state import DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_STUCK_REFLECTS, IterRetState, SearchStep
 
@@ -59,14 +61,21 @@ def abstract_situation(condition: str, llm: LLMClient) -> str:
 
 
 def retrieve_node(
-    state: IterRetState, graph: CueTagContentGraph, bank: ExperienceBank, llm: LLMClient
+    state: IterRetState,
+    graph: CueTagContentGraph,
+    bank: ExperienceBank,
+    llm: LLMClient,
+    limits: TraversalLimits | None = None,
 ) -> IterRetState:
+    limits = limits or TraversalLimits()
     query = state.get("current_refined_query") or state["original_query"]
     active_set = state.setdefault("active_set", {"cues": [], "tags": [], "contents": []})
     visited = set(state.get("visited_content_ids", []))
 
     if not active_set["cues"]:
-        active_set["cues"] = sorted(graph.match_query_to_cues(query, max_matches=MAX_ACTIVE_CUES))
+        active_set["cues"] = sorted(
+            graph.match_query_to_cues(query, max_matches=limits.max_active_cues)
+        )
 
     # Planning experience retrieval (R2-Mem Eq. 12, c_i = q_i)
     condition = planning_condition(query)
@@ -92,8 +101,8 @@ def retrieve_node(
     new_contents: set = set()
     if "cue_to_tag" in actions:
         new_tags |= graph.forward_cue_to_tag(active_set["cues"])
-        if len(new_tags) > MAX_ACTIVE_TAGS:
-            new_tags = set(graph.rank_tags_by_relevance(new_tags, query)[:MAX_ACTIVE_TAGS])
+        if len(new_tags) > limits.max_active_tags:
+            new_tags = set(graph.rank_tags_by_relevance(new_tags, query)[: limits.max_active_tags])
     if "tag_to_content" in actions:
         new_contents |= graph.forward_tag_to_content(
             active_set["cues"],
@@ -101,15 +110,20 @@ def retrieve_node(
             exclude_tags=exclude_tags,
             exclude_content_ids=visited,
         )
-        if len(new_contents) > MAX_NEW_CONTENT_PER_ROUND:
+        if len(new_contents) > limits.max_new_content_per_round:
             new_contents = set(
-                graph.rank_contents_by_relevance(new_contents, query)[:MAX_NEW_CONTENT_PER_ROUND]
+                graph.rank_contents_by_relevance(new_contents, query)[
+                    : limits.max_new_content_per_round
+                ]
             )
     if "content_to_cue_tag" in actions and active_set["contents"]:
         for cue_id, tag in graph.reverse_content_to_cue_tag(active_set["contents"]):
-            if cue_id not in active_set["cues"] and len(active_set["cues"]) < MAX_ACTIVE_CUES:
+            if (
+                cue_id not in active_set["cues"]
+                and len(active_set["cues"]) < limits.max_active_cues
+            ):
                 active_set["cues"].append(cue_id)
-            if len(new_tags) < MAX_ACTIVE_TAGS:
+            if len(new_tags) < limits.max_active_tags:
                 new_tags.add(tag)
 
     # Order by relevance to the current query, not alphabetically: the whole point of capping
@@ -134,6 +148,7 @@ def retrieve_node(
             + (f" (excluded tags: {sorted(exclude_tags)})" if exclude_tags else ""),
             found_summary=f"{len(new_contents)} new content node(s)",
             decision="retrieve",
+            rubric_scores={},
         )
     )
     return state
@@ -154,6 +169,7 @@ def reflect_node(
     original_query = state["original_query"]
     evidence = state.setdefault("accumulated_evidence", [])
     gaps = state.setdefault("information_gaps", [])
+    tracker = EvidenceTracker(evidence, gaps)
 
     # Reflection experience retrieval (R2-Mem Eq. 12, c_i = [Q + m_i])
     condition = reflection_condition(original_query, evidence)
@@ -164,8 +180,8 @@ def reflect_node(
     routing_prompt = json.dumps(
         {
             "original_query": original_query,
-            "evidence": evidence,
-            "gaps": gaps,
+            "evidence": tracker.evidence,
+            "gaps": tracker.gaps,
             "new_content": new_content_payload,
             "reflection_advice": advice_text,
         }
@@ -184,19 +200,11 @@ def reflect_node(
             # silently discarding everything that was just retrieved.
             kept_ids = new_content_ids
     kept_texts = [graph.contents[cid].display_text() for cid in kept_ids]
-    made_progress = bool(kept_texts)
-    for text in kept_texts:
-        if text not in evidence:
-            evidence.append(text)
+    made_progress = tracker.add_evidence(kept_texts)
+    tracker.update_gaps(parsed.get("resolved_gaps", []), parsed.get("new_gaps", []))
 
-    resolved = set(parsed.get("resolved_gaps", []))
-    remaining_gaps = [g for g in gaps if g not in resolved]
-    for new_gap in parsed.get("new_gaps", []):
-        if new_gap not in remaining_gaps:
-            remaining_gaps.append(new_gap)
-
-    state["information_gaps"] = remaining_gaps
-    state["accumulated_evidence"] = evidence
+    state["information_gaps"] = tracker.gaps
+    state["accumulated_evidence"] = tracker.evidence
     state["visited_content_ids"] = sorted(
         set(state.get("visited_content_ids", [])) | set(new_content_ids)
     )
@@ -206,10 +214,14 @@ def reflect_node(
     )
 
     next_query = parsed.get("next_query") or ""
-    if remaining_gaps and next_query:
+    if tracker.gaps and next_query:
         state["current_refined_query"] = f"{original_query} | {next_query}"
-    elif not remaining_gaps:
+    elif not tracker.gaps:
         state["current_refined_query"] = original_query
+
+    rubric_scores, _ = score_reflect_step(
+        original_query, tracker.evidence, tracker.gaps, next_query, llm
+    )
 
     trajectory = state.setdefault("search_trajectory", [])
     trajectory.append(
@@ -218,8 +230,9 @@ def reflect_node(
             module="Reflection",
             query_used=state.get("current_refined_query", original_query),
             action_taken="f_route+gap_update",
-            found_summary=f"kept {len(kept_texts)} item(s); {len(remaining_gaps)} gap(s) remain",
+            found_summary=f"kept {len(kept_texts)} item(s); {len(tracker.gaps)} gap(s) remain",
             decision="reflect",
+            rubric_scores=rubric_scores,
         )
     )
     return state
@@ -261,6 +274,7 @@ def answer_node(state: IterRetState, llm: LLMClient) -> IterRetState:
             action_taken="answer",
             found_summary="final answer synthesized",
             decision="answer",
+            rubric_scores={},
         )
     )
     return state

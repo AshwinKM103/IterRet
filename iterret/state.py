@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional, TypedDict
+from typing import Literal, TypedDict
 
 
 class SearchStep(TypedDict):
@@ -11,21 +10,24 @@ class SearchStep(TypedDict):
     action_taken: str
     found_summary: str
     decision: str  # "retrieve" | "reflect" | "answer"
+    rubric_scores: dict[str, int]  # per-dimension COLM rubric scores (COLM §1.4.2)
 
 
 class IterRetState(TypedDict, total=False):
     original_query: str  # q
     current_refined_query: str  # q^ret_k = q (+) delta_q_k  (MemR3 Eq. 5)
-    accumulated_evidence: List[str]  # E_k / H^(t)
-    information_gaps: List[str]  # G_k
-    active_set: Dict[str, List[str]]  # Z^(t): {"cues": [...], "tags": [...], "contents": [...]}
-    visited_content_ids: List[str]  # masked retrieval, MemR3 Eq. 5: M \ M_ret_{k-1}
-    search_trajectory: List[SearchStep]
+    accumulated_evidence: list[str]  # E_k / H^(t)
+    information_gaps: list[str]  # G_k
+    active_set: dict[str, list[str]]  # Z^(t): {"cues": [...], "tags": [...], "contents": [...]}
+    visited_content_ids: list[str]  # masked retrieval, MemR3 Eq. 5: M \ M_ret_{k-1}
+    search_trajectory: list[SearchStep]
     iteration_count: int
     max_iterations: int  # n_max
     consecutive_stuck_reflects: int  # toward n_cap
-    _scratch_new_retrieval: List[str]  # content ids retrieved this round, awaiting Reflect's f_route
-    final_answer: Optional[str]
+    _scratch_new_retrieval: list[
+        str
+    ]  # content ids retrieved this round, awaiting Reflect's f_route
+    final_answer: str | None
 
 
 DEFAULT_MAX_ITERATIONS = 5  # n_max, MemR3 main config
