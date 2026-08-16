@@ -1,19 +1,14 @@
-
 from __future__ import annotations
 
 import json
 from typing import Literal
 
+from .config import MAX_ACTIVE_CUES, MAX_ACTIVE_TAGS, MAX_NEW_CONTENT_PER_ROUND
 from .ctc_graph import CueTagContentGraph
 from .experience_bank import ExperienceBank, planning_condition, reflection_condition
 from .json_utils import parse_json_object
 from .llm_client import LLMClient
 from .state import DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_STUCK_REFLECTS, IterRetState, SearchStep
-
-MAX_ACTIVE_CUES = 40
-
-MAX_ACTIVE_TAGS = 15
-MAX_NEW_CONTENT_PER_ROUND = 25
 
 _SITUATION_SYSTEM_PROMPT = """situation_abstraction
 Abstract the given condition into a short, general situation description
@@ -63,8 +58,9 @@ def abstract_situation(condition: str, llm: LLMClient) -> str:
     return parse_json_object(raw).get("situation") or condition
 
 
-def retrieve_node(state: IterRetState, graph: CueTagContentGraph, bank: ExperienceBank,
-                   llm: LLMClient) -> IterRetState:
+def retrieve_node(
+    state: IterRetState, graph: CueTagContentGraph, bank: ExperienceBank, llm: LLMClient
+) -> IterRetState:
     query = state.get("current_refined_query") or state["original_query"]
     active_set = state.setdefault("active_set", {"cues": [], "tags": [], "contents": []})
     visited = set(state.get("visited_content_ids", []))
@@ -79,11 +75,13 @@ def retrieve_node(state: IterRetState, graph: CueTagContentGraph, bank: Experien
     advice_text = "; ".join(entry["experience"] for entry in advice_entries)
 
     # Action selection f_select (Eq. 10), Planning-experience-guided
-    selection_prompt = json.dumps({
-        "query": query,
-        "active_set": active_set,
-        "planning_advice": advice_text,
-    })
+    selection_prompt = json.dumps(
+        {
+            "query": query,
+            "active_set": active_set,
+            "planning_advice": advice_text,
+        }
+    )
     raw = llm.chat(_ACTION_SELECTION_SYSTEM_PROMPT, selection_prompt)
     parsed = parse_json_object(raw)
     actions = parsed.get("actions") or ["cue_to_tag", "tag_to_content"]
@@ -98,10 +96,15 @@ def retrieve_node(state: IterRetState, graph: CueTagContentGraph, bank: Experien
             new_tags = set(graph.rank_tags_by_relevance(new_tags, query)[:MAX_ACTIVE_TAGS])
     if "tag_to_content" in actions:
         new_contents |= graph.forward_tag_to_content(
-            active_set["cues"], new_tags, exclude_tags=exclude_tags, exclude_content_ids=visited,
+            active_set["cues"],
+            new_tags,
+            exclude_tags=exclude_tags,
+            exclude_content_ids=visited,
         )
         if len(new_contents) > MAX_NEW_CONTENT_PER_ROUND:
-            new_contents = set(graph.rank_contents_by_relevance(new_contents, query)[:MAX_NEW_CONTENT_PER_ROUND])
+            new_contents = set(
+                graph.rank_contents_by_relevance(new_contents, query)[:MAX_NEW_CONTENT_PER_ROUND]
+            )
     if "content_to_cue_tag" in actions and active_set["contents"]:
         for cue_id, tag in graph.reverse_content_to_cue_tag(active_set["contents"]):
             if cue_id not in active_set["cues"] and len(active_set["cues"]) < MAX_ACTIVE_CUES:
@@ -122,25 +125,31 @@ def retrieve_node(state: IterRetState, graph: CueTagContentGraph, bank: Experien
     state["iteration_count"] = state.get("iteration_count", 0) + 1
 
     trajectory = state.setdefault("search_trajectory", [])
-    trajectory.append(SearchStep(
-        iteration=state["iteration_count"],
-        module="Planning",
-        query_used=query,
-        action_taken="+".join(actions) + (f" (excluded tags: {sorted(exclude_tags)})" if exclude_tags else ""),
-        found_summary=f"{len(new_contents)} new content node(s)",
-        decision="retrieve",
-    ))
+    trajectory.append(
+        SearchStep(
+            iteration=state["iteration_count"],
+            module="Planning",
+            query_used=query,
+            action_taken="+".join(actions)
+            + (f" (excluded tags: {sorted(exclude_tags)})" if exclude_tags else ""),
+            found_summary=f"{len(new_contents)} new content node(s)",
+            decision="retrieve",
+        )
+    )
     return state
 
 
-def reflect_node(state: IterRetState, graph: CueTagContentGraph, bank: ExperienceBank,
-                  llm: LLMClient) -> IterRetState:
+def reflect_node(
+    state: IterRetState, graph: CueTagContentGraph, bank: ExperienceBank, llm: LLMClient
+) -> IterRetState:
     new_content_ids = state.get("_scratch_new_retrieval", [])
     new_content_ids = [cid for cid in new_content_ids if cid in graph.contents]
     # The LLM can only return ids for content it was actually shown an id
     # for, so pair each id with its text rather than handing over bare text
     # (which it would otherwise just echo back, never matching a real id).
-    new_content_payload = [{"id": cid, "text": graph.contents[cid].display_text()} for cid in new_content_ids]
+    new_content_payload = [
+        {"id": cid, "text": graph.contents[cid].display_text()} for cid in new_content_ids
+    ]
 
     original_query = state["original_query"]
     evidence = state.setdefault("accumulated_evidence", [])
@@ -152,13 +161,15 @@ def reflect_node(state: IterRetState, graph: CueTagContentGraph, bank: Experienc
     advice_entries = bank.retrieve(condition, situation, module="Reflection")
     advice_text = "; ".join(entry["experience"] for entry in advice_entries)
 
-    routing_prompt = json.dumps({
-        "original_query": original_query,
-        "evidence": evidence,
-        "gaps": gaps,
-        "new_content": new_content_payload,
-        "reflection_advice": advice_text,
-    })
+    routing_prompt = json.dumps(
+        {
+            "original_query": original_query,
+            "evidence": evidence,
+            "gaps": gaps,
+            "new_content": new_content_payload,
+            "reflection_advice": advice_text,
+        }
+    )
     raw = llm.chat(_ROUTING_SYSTEM_PROMPT, routing_prompt)
     parsed = parse_json_object(raw)
 
@@ -186,9 +197,13 @@ def reflect_node(state: IterRetState, graph: CueTagContentGraph, bank: Experienc
 
     state["information_gaps"] = remaining_gaps
     state["accumulated_evidence"] = evidence
-    state["visited_content_ids"] = sorted(set(state.get("visited_content_ids", [])) | set(new_content_ids))
+    state["visited_content_ids"] = sorted(
+        set(state.get("visited_content_ids", [])) | set(new_content_ids)
+    )
     state["_scratch_new_retrieval"] = []
-    state["consecutive_stuck_reflects"] = 0 if made_progress else state.get("consecutive_stuck_reflects", 0) + 1
+    state["consecutive_stuck_reflects"] = (
+        0 if made_progress else state.get("consecutive_stuck_reflects", 0) + 1
+    )
 
     next_query = parsed.get("next_query") or ""
     if remaining_gaps and next_query:
@@ -197,14 +212,16 @@ def reflect_node(state: IterRetState, graph: CueTagContentGraph, bank: Experienc
         state["current_refined_query"] = original_query
 
     trajectory = state.setdefault("search_trajectory", [])
-    trajectory.append(SearchStep(
-        iteration=state.get("iteration_count", 0),
-        module="Reflection",
-        query_used=state.get("current_refined_query", original_query),
-        action_taken="f_route+gap_update",
-        found_summary=f"kept {len(kept_texts)} item(s); {len(remaining_gaps)} gap(s) remain",
-        decision="reflect",
-    ))
+    trajectory.append(
+        SearchStep(
+            iteration=state.get("iteration_count", 0),
+            module="Reflection",
+            query_used=state.get("current_refined_query", original_query),
+            action_taken="f_route+gap_update",
+            found_summary=f"kept {len(kept_texts)} item(s); {len(remaining_gaps)} gap(s) remain",
+            decision="reflect",
+        )
+    )
     return state
 
 
@@ -236,12 +253,14 @@ def answer_node(state: IterRetState, llm: LLMClient) -> IterRetState:
     state["final_answer"] = llm.chat(_ANSWER_SYSTEM_PROMPT, user_prompt)
 
     trajectory = state.setdefault("search_trajectory", [])
-    trajectory.append(SearchStep(
-        iteration=state.get("iteration_count", 0),
-        module="Reflection",
-        query_used=state["original_query"],
-        action_taken="answer",
-        found_summary="final answer synthesized",
-        decision="answer",
-    ))
+    trajectory.append(
+        SearchStep(
+            iteration=state.get("iteration_count", 0),
+            module="Reflection",
+            query_used=state["original_query"],
+            action_taken="answer",
+            found_summary="final answer synthesized",
+            decision="answer",
+        )
+    )
     return state

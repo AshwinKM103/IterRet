@@ -1,10 +1,8 @@
-
 from __future__ import annotations
 
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
 
 # Defaults match `vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000 ...`.
 # The "model" field in chat-completions requests MUST equal the name vLLM
@@ -17,11 +15,11 @@ ENV_LLM_BASE_URL = "ITERRET_LLM_BASE_URL"
 ENV_LLM_MODEL = "ITERRET_LLM_MODEL"
 
 
-def resolve_llm_base_url(cli_value: Optional[str] = None) -> str:
+def resolve_llm_base_url(cli_value: str | None = None) -> str:
     return cli_value or os.environ.get(ENV_LLM_BASE_URL) or DEFAULT_LLM_BASE_URL
 
 
-def resolve_llm_model(cli_value: Optional[str] = None) -> str:
+def resolve_llm_model(cli_value: str | None = None) -> str:
     return cli_value or os.environ.get(ENV_LLM_MODEL) or DEFAULT_LLM_MODEL
 
 
@@ -39,8 +37,13 @@ class OpenAICompatibleLLMClient(LLMClient):
     actually called, so importing this module stays side-effect free.
     """
 
-    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None,
-                 api_key: str = "not-needed", max_tokens: int = 1024) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        api_key: str = "not-needed",
+        max_tokens: int = 1024,
+    ) -> None:
         self.base_url = resolve_llm_base_url(base_url)
         self.model = resolve_llm_model(model)
         self.api_key = api_key
@@ -93,7 +96,7 @@ class MockLLMClient(LLMClient):
         if "routing_and_reflection" in text:
             return self._routing_reply(user_prompt)
         if "rubric_evaluation" in text:
-            return self._evaluation_reply()
+            return self._evaluation_reply(user_prompt)
         if "experience_distillation" in text:
             return self._distillation_reply(user_prompt)
         if "final_answer" in text:
@@ -125,30 +128,40 @@ class MockLLMClient(LLMClient):
     def _routing_reply(self, user_prompt: str) -> str:
         # progressively resolve gaps so the mock demo converges in a few iterations
         resolved_all = self._call_count >= 3
-        return json.dumps({
-            "kept_content_ids": "ALL",
-            "resolved_gaps": ["initial: no evidence gathered yet"] if self._call_count == 1 else [],
-            "new_gaps": [] if resolved_all else ["need more supporting detail"],
-            "next_query": "" if resolved_all else "additional supporting detail",
-        })
+        return json.dumps(
+            {
+                "kept_content_ids": "ALL",
+                "resolved_gaps": ["initial: no evidence gathered yet"]
+                if self._call_count == 1
+                else [],
+                "new_gaps": [] if resolved_all else ["need more supporting detail"],
+                "next_query": "" if resolved_all else "additional supporting detail",
+            }
+        )
 
-    def _evaluation_reply(self) -> str:
-        # alternate good/bad scores so both quality branches get exercised offline
-        score = 11 if self._call_count % 2 == 0 else 3
-        return json.dumps({
-            "score": score,
-            "reason": "mock rubric reason for step %d" % self._call_count,
-            "advice": "mock actionable advice for step %d" % self._call_count,
-        })
+    def _evaluation_reply(self, user_prompt: str) -> str:
+        # alternate good/bad dimension scores so both quality branches get exercised offline
+        try:
+            dimensions = json.loads(user_prompt).get("rubric_dimensions", [])
+        except (json.JSONDecodeError, AttributeError):
+            dimensions = []
+        per_dimension_score = 3 if self._call_count % 2 == 0 else 1
+        rubrics = {dimension: per_dimension_score for dimension in dimensions}
+        return json.dumps(
+            {
+                "rubrics": rubrics,
+                "reason_and_advice": f"mock rubric reason and advice for step {self._call_count}",
+            }
+        )
 
     def _distillation_reply(self, user_prompt: str) -> str:
-        return json.dumps({
-            "thinking": "mock analysis",
-            "summary": "mock trajectory summary",
-            "situation": "a query requiring iterative graph traversal",
-            "experience": "IF the situation is ambiguous THEN prefer cue_to_tag before "
-                          "tag_to_content and avoid re-expanding already-visited tags",
-        })
+        return json.dumps(
+            {
+                "situation": "a query requiring iterative graph traversal",
+                "experience": "IF the situation is ambiguous THEN prefer cue_to_tag before "
+                "tag_to_content and avoid re-expanding already-visited tags",
+            }
+        )
 
     def _answer_reply(self, user_prompt: str) -> str:
         return "Based on the gathered evidence, here is the answer (mock LLM)."
@@ -175,9 +188,17 @@ class MockLLMClient(LLMClient):
     def _semantic_extraction_reply(self, user_prompt: str) -> str:
         first_line = user_prompt.splitlines()[0] if user_prompt else ""
         speaker = first_line.split(":")[0].strip() if ":" in first_line else "Unknown"
-        return json.dumps({"semantics": [
-            {"cue": speaker, "tag": "General", "content": f"{speaker} appears across this conversation."}
-        ]})
+        return json.dumps(
+            {
+                "semantics": [
+                    {
+                        "cue": speaker,
+                        "tag": "General",
+                        "content": f"{speaker} appears across this conversation.",
+                    }
+                ]
+            }
+        )
 
     def _judge_reply(self, user_prompt: str) -> str:
         try:
@@ -185,7 +206,11 @@ class MockLLMClient(LLMClient):
         except (json.JSONDecodeError, TypeError):
             parsed = {}
         predicted = str(parsed.get("predicted_answer", "")).lower()
-        correct = bool(predicted) and "cannot be determined" not in predicted and "mock llm" not in predicted
+        correct = (
+            bool(predicted)
+            and "cannot be determined" not in predicted
+            and "mock llm" not in predicted
+        )
         return json.dumps({"correct": correct, "reason": "mock heuristic judge"})
 
     def _topic_abstraction_reply(self, user_prompt: str) -> str:

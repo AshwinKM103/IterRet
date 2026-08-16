@@ -1,8 +1,7 @@
-
 from __future__ import annotations
 
 import json
-from typing import Literal, Tuple
+from typing import Literal
 
 from .json_utils import parse_json_object
 from .llm_client import LLMClient
@@ -22,47 +21,71 @@ REFLECTION_RUBRICS = [
     "Answer Completeness Awareness",
 ]
 
-K_LOW = 5
-K_HIGH = 10
+HIGH_THRESHOLD = 10  # total rubric score (0-12) at/above which a step is distilled as high-quality
+LOW_THRESHOLD = (
+    5  # total rubric score at/below which a step is distilled as low-quality (corrective)
+)
 
 Quality = Literal["good", "bad", "discard"]
 
 _EVALUATOR_SYSTEM_PROMPT = """rubric_evaluation
 You are an expert evaluator for an AI memory deep search system (R2-Mem style).
-Score the given step along its module's rubric dimensions (0-3 each), sum
-into an overall score, and give a short reason and actionable advice.
-Reply as JSON: {"score": int, "reason": str, "advice": str}.
+Score the given step against its module's rubric dimensions, 0-3 points
+each, and give a short reason plus actionable advice for future steps.
+Reply as JSON: {"module": str, "rubrics": {<dimension>: int, ...}, "reason_and_advice": str}.
 """
 
 
-def _rubrics_for(module: str) -> list:
+def _rubrics_for(module: str) -> list[str]:
     return PLANNING_RUBRICS if module == "Planning" else REFLECTION_RUBRICS
 
 
-def score_step(step: SearchStep, llm: LLMClient) -> Tuple[int, str, str]:
-    rubrics = _rubrics_for(step["module"])
-    user_prompt = json.dumps({
-        "module": step["module"],
-        "rubrics": rubrics,
-        "query_used": step["query_used"],
-        "action_taken": step["action_taken"],
-        "found_summary": step["found_summary"],
-        "decision": step["decision"],
-    })
+def _sum_rubric_scores(rubrics: dict[str, object], dimensions: list[str]) -> int:
+    total = 0
+    for dimension in dimensions:
+        try:
+            total += int(rubrics.get(dimension, 0))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def score_step(step: SearchStep, llm: LLMClient) -> tuple[int, str]:
+    """Scores one trajectory step against its module's rubric.
+
+    Returns ``(total_score, reason_and_advice)``. The LLM reports per-dimension
+    scores; the total is summed here in code rather than trusted verbatim
+    from the model, matching R2-Mem's Evaluator contract (judge_model.py:
+    per-step "rubrics" dict summed into a 0-12 total_score).
+    """
+    dimensions = _rubrics_for(step["module"])
+    user_prompt = json.dumps(
+        {
+            "module": step["module"],
+            "rubric_dimensions": dimensions,
+            "query_used": step["query_used"],
+            "action_taken": step["action_taken"],
+            "found_summary": step["found_summary"],
+            "decision": step["decision"],
+        }
+    )
     raw = llm.chat(_EVALUATOR_SYSTEM_PROMPT, user_prompt)
     parsed = parse_json_object(raw)
-    try:
-        score = int(parsed.get("score", 0))
-    except (TypeError, ValueError):
-        score = 0
-    reason = str(parsed.get("reason", "") or ("unparseable evaluator reply" if not parsed else ""))
-    advice = str(parsed.get("advice", ""))
-    return score, reason, advice
+    rubrics = parsed.get("rubrics", {})
+    if not isinstance(rubrics, dict):
+        rubrics = {}
+    total_score = _sum_rubric_scores(rubrics, dimensions)
+    reason_and_advice = str(
+        parsed.get("reason_and_advice", "") or ("unparseable evaluator reply" if not parsed else "")
+    )
+    return total_score, reason_and_advice
 
 
-def classify(score: int, *, k_low: int = K_LOW, k_high: int = K_HIGH) -> Quality:
-    if score > k_high:
+def classify(
+    score: int, *, high_threshold: int = HIGH_THRESHOLD, low_threshold: int = LOW_THRESHOLD
+) -> Quality:
+    if score >= high_threshold:
         return "good"
-    if score < k_low:
+    if score <= low_threshold:
         return "bad"
     return "discard"

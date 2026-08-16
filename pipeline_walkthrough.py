@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from iterret import evaluator, learner
 from iterret.ctc_graph import CueTagContentGraph
@@ -36,15 +36,23 @@ def _sub(title: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Narrated walkthrough of the offline + online ITERRET pipeline.")
-    parser.add_argument("--use-real-llm", action="store_true",
-                         help="Use a real OpenAI-compatible server instead of the default mock. "
-                              "Don't combine this with another job already saturating the same server.")
+    parser = argparse.ArgumentParser(
+        description="Narrated walkthrough of the offline + online ITERRET pipeline."
+    )
+    parser.add_argument(
+        "--use-real-llm",
+        action="store_true",
+        help="Use a real OpenAI-compatible server instead of the default mock. "
+        "Don't combine this with another job already saturating the same server.",
+    )
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-model", default=None)
     parser.add_argument("--max-iterations", type=int, default=5)
-    parser.add_argument("--question", default=None,
-                         help="Override the online-stage question (default: first held-out sample question).")
+    parser.add_argument(
+        "--question",
+        default=None,
+        help="Override the online-stage question (default: first held-out sample question).",
+    )
     return parser.parse_args()
 
 
@@ -104,10 +112,18 @@ def offline_build_graph(args: argparse.Namespace) -> CueTagContentGraph:
 
     _sub("Graph summary")
     print(f"  total cues:                  {len(graph.cues)}")
-    print(f"  episodic content nodes:      {sum(1 for n in graph.contents.values() if n.layer == 'episodic')}")
-    print(f"  semantic content nodes:      {sum(1 for n in graph.contents.values() if n.layer == 'semantic')}")
-    print(f"  topic content nodes:         {sum(1 for n in graph.contents.values() if n.layer == 'topic')}")
-    print(f"  total cue-tag-content links: {sum(len(v) for v in graph.cue_tag_to_content.values())}")
+    print(
+        f"  episodic content nodes:      {sum(1 for n in graph.contents.values() if n.layer == 'episodic')}"
+    )
+    print(
+        f"  semantic content nodes:      {sum(1 for n in graph.contents.values() if n.layer == 'semantic')}"
+    )
+    print(
+        f"  topic content nodes:         {sum(1 for n in graph.contents.values() if n.layer == 'topic')}"
+    )
+    print(
+        f"  total cue-tag-content links: {sum(len(v) for v in graph.cue_tag_to_content.values())}"
+    )
     print("\n>>> This graph is now FROZEN. Nothing past this point ever calls")
     print(">>> graph.add_content() / graph.add_cue() / graph.link() again.")
     return graph
@@ -116,7 +132,9 @@ def offline_build_graph(args: argparse.Namespace) -> CueTagContentGraph:
 # ======================================================================
 # OFFLINE STAGE, PART 2: build the experience bank
 # ======================================================================
-def offline_build_experience_bank(graph: CueTagContentGraph, args: argparse.Namespace) -> ExperienceBank:
+def offline_build_experience_bank(
+    graph: CueTagContentGraph, args: argparse.Namespace
+) -> ExperienceBank:
     _banner("OFFLINE STAGE -- PART 2: build the Planning/Reflection experience bank", "#")
     print("Still entirely offline. Runs bootstrap questions through the SAME retrieve/")
     print("reflect/route/answer loop used online below, but UNGUIDED (empty bank) --")
@@ -124,22 +142,26 @@ def offline_build_experience_bank(graph: CueTagContentGraph, args: argparse.Name
     print("(R2-Mem Algorithm 1). The bank built here is what the ONLINE stage reads from.")
 
     bootstrap_questions = sample_dialogue_bootstrap_questions()
-    _sub(f"Bootstrap questions used ({len(bootstrap_questions)}) -- kept DISJOINT from the "
-         f"eval question below")
+    _sub(
+        f"Bootstrap questions used ({len(bootstrap_questions)}) -- kept DISJOINT from the "
+        f"eval question below"
+    )
     for q in bootstrap_questions:
         print(f"  - {q}")
 
     unguided_bank = empty_experience_bank()
     llm = make_llm(args)
 
-    steps_for_distillation: List[Tuple[Dict[str, Any], str, list]] = []
+    steps_for_distillation: list[tuple[dict[str, Any], str, list]] = []
     for q_idx, question in enumerate(bootstrap_questions, 1):
         _sub(f"Unguided trajectory {q_idx}/{len(bootstrap_questions)}: {question!r}")
         state = new_state(question, max_iterations=args.max_iterations)
         for rnd in range(args.max_iterations):
             state = retrieve_node(state, graph, unguided_bank, llm)
             r_step = state["search_trajectory"][-1]
-            print(f"    [round {rnd + 1}] RETRIEVE: action={r_step['action_taken']!r} -> {r_step['found_summary']}")
+            print(
+                f"    [round {rnd + 1}] RETRIEVE: action={r_step['action_taken']!r} -> {r_step['found_summary']}"
+            )
 
             state = reflect_node(state, graph, unguided_bank, llm)
             f_step = state["search_trajectory"][-1]
@@ -160,22 +182,31 @@ def offline_build_experience_bank(graph: CueTagContentGraph, args: argparse.Name
             if step["decision"] != "answer":  # rubrics target Planning/Reflection steps only
                 steps_for_distillation.append((step, question, list(state["accumulated_evidence"])))
 
-    _sub(f"Rubric-guided Evaluator + self-Reflection Learner over {len(steps_for_distillation)} step(s)")
+    _sub(
+        f"Rubric-guided Evaluator + self-Reflection Learner over {len(steps_for_distillation)} step(s)"
+    )
     bank = ExperienceBank(build_default_embedding_backend())
     for step, question, final_evidence in steps_for_distillation:
-        score, reason, advice = evaluator.score_step(step, llm)
+        score, reason_and_advice = evaluator.score_step(step, llm)
         quality = evaluator.classify(score)
-        print(f"  iter={step['iteration']} module={step['module']:<10} score={score:>2} -> {quality:<7}"
-              f" | reason: {reason[:70]}")
+        print(
+            f"  iter={step['iteration']} module={step['module']:<10} score={score:>2} -> {quality:<7}"
+            f" | reason: {reason_and_advice[:70]}"
+        )
         if quality == "discard":
             continue
-        for module in ("Planning", "Reflection"):
-            entry = learner.distill_experience(
-                step, reason, advice, quality, module, llm,
-                original_query=question, accumulated_evidence=final_evidence,
-            )
-            bank.add_experience(entry["condition"], entry["situation"], entry["experience"], module)
-            print(f"      -> distilled {module} experience: {entry['experience']}")
+        module = step["module"]
+        entry = learner.distill_experience(
+            step,
+            reason_and_advice,
+            quality,
+            module,
+            llm,
+            original_query=question,
+            accumulated_evidence=final_evidence,
+        )
+        bank.add_experience(entry["condition"], entry["situation"], entry["experience"], module)
+        print(f"      -> distilled {module} experience: {entry['experience']}")
 
     _sub("Experience bank summary")
     print(f"  Planning entries:   {len(bank.planning_bank)}")
@@ -189,7 +220,10 @@ def offline_build_experience_bank(graph: CueTagContentGraph, args: argparse.Name
 # ONLINE STAGE: answer one held-out question, round by round
 # ======================================================================
 def online_answer_question(
-    graph: CueTagContentGraph, bank: ExperienceBank, question: str, args: argparse.Namespace,
+    graph: CueTagContentGraph,
+    bank: ExperienceBank,
+    question: str,
+    args: argparse.Namespace,
 ) -> IterRetState:
     _banner("ONLINE STAGE: answer a HELD-OUT question, round by round", "#")
     print("The only part that runs 'at query time'. It only ever READS the graph and bank")
@@ -261,7 +295,9 @@ def online_answer_question(
 # ======================================================================
 def main() -> None:
     args = parse_args()
-    print("LLM backend:", "REAL" if args.use_real_llm else "MOCK (default -- zero GPU/network load)")
+    print(
+        "LLM backend:", "REAL" if args.use_real_llm else "MOCK (default -- zero GPU/network load)"
+    )
     if args.use_real_llm:
         probe = OpenAICompatibleLLMClient(base_url=args.llm_base_url, model=args.llm_model)
         print(f"  -> {probe.base_url} (model={probe.model})")
@@ -277,10 +313,14 @@ def main() -> None:
     n_semantic = sum(1 for n in graph.contents.values() if n.layer == "semantic")
     n_topic = sum(1 for n in graph.contents.values() if n.layer == "topic")
     print("OFFLINE, built once, reused for every question:")
-    print(f"  - CTC graph: {len(graph.cues)} cues, {n_episodic} episodic + {n_semantic} semantic"
-          f" + {n_topic} topic content node(s)")
-    print(f"  - Experience bank: {len(bank.planning_bank)} Planning + {len(bank.reflection_bank)} "
-          f"Reflection entries")
+    print(
+        f"  - CTC graph: {len(graph.cues)} cues, {n_episodic} episodic + {n_semantic} semantic"
+        f" + {n_topic} topic content node(s)"
+    )
+    print(
+        f"  - Experience bank: {len(bank.planning_bank)} Planning + {len(bank.reflection_bank)} "
+        f"Reflection entries"
+    )
     print("\nONLINE, ran fresh for this one question, read-only against the above:")
     print(f"  - Question: {question!r}")
     print(f"  - Iterations used: {final_state.get('iteration_count')} / {args.max_iterations}")
