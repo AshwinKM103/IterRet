@@ -2,19 +2,9 @@
 
 LLM client abstraction for IterRet's closed-loop memory reconstruction.
 
-## Overview
-
-The models module provides a pluggable LLM interface for all text-generation tasks in IterRet:
-
-- Condition abstraction (`abstract_situation`)
-- Cue extraction (`extract_cue_terms`)
-- Action selection (`select_actions_for_traversal`)
-- Content routing and reflection (`route_and_reflect`)
-- Final answer synthesis (`synthesize_answer`)
-
 ## Key Classes
 
-### `LLMClient` (Abstract)
+**`LLMClient` (Abstract)**
 
 Base interface for all LLM implementations:
 
@@ -22,44 +12,38 @@ Base interface for all LLM implementations:
 def chat(self, system_prompt: str, user_prompt: str, *, temperature: float = 0.0) -> str
 ```
 
-Implementations **must**:
+- Must accept system + user prompt
+- Must support optional `temperature` (default 0.0 for deterministic output)
+- Must return raw text response
+- Raises `RuntimeError` if dependencies missing or endpoint fails
 
-- Accept system prompt + user prompt
-- Support optional `temperature` parameter (default 0.0 for deterministic outputs)
-- Return raw text content of the model's response
-- Raise `RuntimeError` if dependencies are missing or the endpoint fails
+**`OpenAICompatibleLLMClient`**
 
-### `OpenAICompatibleLLMClient`
+Production client for OpenAI-compatible endpoints (vLLM, LM Studio, Ollama):
 
-Production client for OpenAI-compatible endpoints (vLLM, LM Studio, Ollama with compatible API):
+- `base_url`: Endpoint (env: `ITERRET_LLM_BASE_URL`)
+- `model`: Model name (env: `ITERRET_LLM_MODEL`)
+- `api_key`: Auth token (default: `not-needed` for local vLLM)
+- `max_tokens`: Response limit (default: 1024)
 
-- **Constructor**:
-  - `base_url`: Endpoint (resolves from `ITERRET_LLM_BASE_URL` env var or CLI override)
-  - `model`: Model name (resolves from `ITERRET_LLM_MODEL` env var or CLI override)
-  - `api_key`: Auth token (default: `"not-needed"` for local vLLM)
-  - `max_tokens`: Response truncation limit (default: 1024)
+Error handling deferred to first `chat()` call for graceful fallback.
 
-- **Error Handling**: Never raises on construction; only surfaces missing `openai` package or connection failure when `chat()` is first called, allowing graceful fallback.
+**`MockLLMClient`**
 
-### `MockLLMClient`
-
-Deterministic test double: stateful, returns scripted responses. Used in offline trajectory collection and testing.
+Deterministic test double with scripted responses. Used for offline testing.
 
 ## Configuration
 
-LLM selection and parameters are configured via `config.yaml`'s `llm` section (see `docs/config-guide.md`):
-
 ```bash
-# Use mock LLM (default)
-python scripts/train.py llm=mock
+# Mock LLM (offline)
+python scripts/train.py llm.type=mock
 
-# Use OpenAI-compatible endpoint
-python scripts/train.py llm=openai_compatible llm.base_url=http://localhost:8000/v1 llm.model=Qwen/Qwen3-4B-Instruct-2507
+# OpenAI-compatible endpoint
+python scripts/train.py llm.type=openai_compatible llm.base_url=http://localhost:8000/v1
 ```
 
-Environment variables (`ITERRET_LLM_BASE_URL`, `ITERRET_LLM_MODEL`) provide defaults if not overridden in config.
+Environment variables (`ITERRET_LLM_BASE_URL`, `ITERRET_LLM_MODEL`) provide defaults.
 
 ## Dependencies
 
-- `openai` package (optional, required only for `OpenAICompatibleLLMClient`)
-- Environment: `ITERRET_LLM_BASE_URL`, `ITERRET_LLM_MODEL` (optional, fall back to defaults)
+- `openai` (optional, required only for `OpenAICompatibleLLMClient`)
