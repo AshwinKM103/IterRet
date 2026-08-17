@@ -7,6 +7,7 @@ token overlap, used to score final answers in closed-loop episodes.
 from __future__ import annotations
 
 import re
+from typing import Any, cast
 
 _PUNCT_RE = re.compile(r"[^\w\s]")
 
@@ -155,3 +156,15 @@ def precision_recall_f1(prediction: str, gold: str) -> tuple[float, float, float
     recall = overlap / len(gold_tokens)
     f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
     return precision, recall, f1
+
+
+def sum_rubric_scores(rubrics: dict[str, object], dimensions: list[str]) -> int:
+    """Sum per-dimension integer scores, ignoring missing or non-integer values."""
+    total = 0
+    for dimension in dimensions:
+        try:
+            value = rubrics.get(dimension, 0)
+            total += int(cast(Any, value))
+        except (TypeError, ValueError):
+            continue
+    return total
