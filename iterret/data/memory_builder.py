@@ -7,47 +7,22 @@ Cue-Tag-Content graph from dialogue turns.
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Iterator
 from typing import Any, TypedDict
 
+from config.constants import DEFAULT_MAX_CHARS_PER_CALL
+
 from ..models.llm_client import LLMClient
 from ..utils.json_utils import parse_json_object
+from ..utils.logger import get_logger
+from ..utils.prompts import (
+    EPISODE_EXTRACTION_SYSTEM_PROMPT,
+    SEMANTIC_EXTRACTION_SYSTEM_PROMPT,
+    TOPIC_ABSTRACTION_SYSTEM_PROMPT,
+)
 from .ctc_graph import CueTagContentGraph
 
-_EPISODE_EXTRACTION_SYSTEM_PROMPT = """episode_extraction
-You build a Cue-Tag-Episode memory graph (MRAgent style) from one dialogue
-turn. Read the turn and produce:
-- "tag": a short phrase (<=4 words) summarizing the relational pattern of
-  this episode (e.g. "Pet Adoption", "Job Change").
-- "cues": a list of fine-grained cues -- entities, names, attributes, or
-  salient descriptors explicitly mentioned in the turn (e.g. speaker name,
-  named entities, key nouns). 2-6 cues.
-Reply as JSON: {"tag": str, "cues": [str, ...]}.
-"""
-
-_SEMANTIC_EXTRACTION_SYSTEM_PROMPT = """semantic_extraction
-You extract stable, entity-anchored semantic facts (MRAgent Cue-Tag-Semantic
-layer) from a dialogue transcript -- personal attributes, preferences, or
-general facts that persist across episodes rather than describing a single
-event. For each fact, identify the entity-level cue it is anchored to (e.g.
-a person's name), an aspect-level tag (e.g. "Preference", "Occupation",
-"Personality"), and the fact content as a short sentence.
-Reply as JSON: {"semantics": [{"cue": str, "tag": str, "content": str}, ...]}.
-If there are no stable facts beyond what episodes already capture, reply
-with {"semantics": []}.
-"""
-
-_TOPIC_ABSTRACTION_SYSTEM_PROMPT = """topic_abstraction
-You group episodic memory units (MRAgent Abstraction layer) into topic
-nodes. Given a list of episodes (id, tag, text), identify recurring themes
-shared across two or more episodes and summarize each as a topic.
-Reply as JSON: {"topics": [{"topic": str, "episode_ids": [str, ...]}, ...]}.
-Every episode_ids entry must be one of the given episode ids. Skip topics
-that would only contain a single episode.
-"""
-
-DEFAULT_MAX_CHARS_PER_CALL = 4000  # conservative for an 8k-token context server
+logger = get_logger(__name__)
 
 
 class DialogueTurn(TypedDict, total=False):
@@ -57,12 +32,12 @@ class DialogueTurn(TypedDict, total=False):
 
 
 def _warn(message: str) -> None:
-    """Print a warning message to stderr with memory-builder prefix.
+    """Warning logged via unified logger.
 
     Args:
-        message: The warning message to print.
+        message: The warning message.
     """
-    print(f"[memory-builder] warning: {message}", file=sys.stderr)
+    logger.warning(message)
 
 
 def _safe_chat(
@@ -144,7 +119,7 @@ def _extract_episode(turn: DialogueTurn, llm: LLMClient) -> dict[str, Any]:
         >>> "Alice" in result["cues"]  # True
     """
     parsed = _safe_chat(
-        _EPISODE_EXTRACTION_SYSTEM_PROMPT,
+        EPISODE_EXTRACTION_SYSTEM_PROMPT,
         json.dumps(dict(turn)),
         llm,
         on_error="episode extraction failed, using fallback tag/cues",
@@ -184,7 +159,7 @@ def _extract_semantics(
     for chunk in _iter_chunks(episode_summaries, text_key="text", max_chars=max_chars):
         full_text = "\n".join(s["text"] for s in chunk)
         parsed = _safe_chat(
-            _SEMANTIC_EXTRACTION_SYSTEM_PROMPT,
+            SEMANTIC_EXTRACTION_SYSTEM_PROMPT,
             full_text,
             llm,
             on_error=f"semantic extraction skipped a {len(chunk)}-episode chunk",
@@ -231,7 +206,7 @@ def _abstract_topics(
         if len(chunk) < 2:
             continue  # can't form a >=2-episode topic from a single-episode chunk
         parsed = _safe_chat(
-            _TOPIC_ABSTRACTION_SYSTEM_PROMPT,
+            TOPIC_ABSTRACTION_SYSTEM_PROMPT,
             json.dumps({"episodes": chunk}),
             llm,
             on_error=f"topic abstraction skipped a {len(chunk)}-episode chunk",

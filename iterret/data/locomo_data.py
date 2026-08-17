@@ -7,23 +7,38 @@ by subset (train/test/val) and format (json/jsonl/csv).
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, TypedDict
+
+from config.constants import DEFAULT_EVAL_CATEGORIES, KNOWN_LOCOMO_PATHS
 
 from .memory_builder import DialogueTurn
 
-CATEGORY_NAMES: dict[int, str] = {
-    1: "Multi-hop",
-    2: "Temporal",
-    3: "Open-domain",
-    4: "Single-hop",
-    5: "Adversarial",
-}
-DEFAULT_EVAL_CATEGORIES: tuple[int, ...] = (
-    1,
-    2,
-    3,
-    4,
-)  # exclude adversarial, matching MRAgent/MemR3
+
+def resolve_locomo_path(cli_value: str | None) -> str:
+    """Resolve the LoCoMo dataset path from an explicit override or known defaults.
+
+    Args:
+        cli_value: An explicit path override (e.g. from a CLI flag or Hydra
+            config); returned as-is if truthy.
+
+    Returns:
+        The first existing path among ``KNOWN_LOCOMO_PATHS`` if no override
+        is given.
+
+    Raises:
+        FileNotFoundError: If ``cli_value`` is empty and none of
+            ``KNOWN_LOCOMO_PATHS`` exist.
+    """
+    if cli_value:
+        return cli_value
+    for candidate in KNOWN_LOCOMO_PATHS:
+        if os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find a LoCoMo dataset file. Tried {KNOWN_LOCOMO_PATHS}; "
+        "pass --locomo-path explicitly."
+    )
 
 
 class LoCoMoQuestion(TypedDict):
