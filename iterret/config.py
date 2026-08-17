@@ -1,7 +1,11 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 """Traversal configuration and limits for CTC graph retrieval.
 
 Defines constraints on active-set sizes at each step of the closed-loop
-memory reconstruction (COLM §1.4.3, Table 1) to keep retrieval deterministic,
+memory reconstruction (closed-loop episode state management, Table 1) to keep retrieval deterministic,
 reproducible, and computationally tractable.
 
 The IterRet closed loop involves multiple nested loops:
@@ -35,47 +39,24 @@ Example:
     >>> limits.max_active_cues
     40
 
-See also COLM §1.4.3 for formal definitions and theoretical justification.
+See also closed-loop episode state management for formal definitions and theoretical justification.
 """
 
-from __future__ import annotations
 
-from dataclasses import dataclass
-
-#: Cap on cues kept in the active frontier after Planning phase.
-#: During retrieval planning, the system identifies relevant cues (e.g., entities,
-#: key terms) from the query. Only the top MAX_ACTIVE_CUES are retained for
-#: expansion into tags. Prevents excessive branching into tag expansion.
-#: Used in retrieve_node and TraversalLimits.
-MAX_ACTIVE_CUES = 40
-
-#: Cap on tags kept in the active frontier after semantic re-ranking.
-#: After expanding cues to tags via CTC and re-ranking by relevance, only the
-#: top MAX_ACTIVE_TAGS are retained for content retrieval. Controls the branching
-#: factor for loading content nodes. Typical range: 10-20.
-#: Used in retrieve_node and TraversalLimits.
-MAX_ACTIVE_TAGS = 15
-
-#: Cap on newly-retrieved content nodes per closed-loop iteration.
-#: After loading content for selected tags, only this many new nodes are added
-#: to accumulated evidence per iteration. Prevents memory explosion and ensures
-#: reasonable evidence bases across many iterations. Typical range: 15-30.
-#: Used in retrieve_node and TraversalLimits.
-MAX_NEW_CONTENT_PER_ROUND = 25
-
-#: Cap on the CTC traversal's internal expand-prune-load iteration loop.
-#: The CTC graph traversal involves expand (cues→tags), semantic re-ranking (prune),
-#: and content loading (load) as internal hops. This limit bounds how many times the
-#: loop cycles before returning control to the outer closed-loop controller
-#: (COLM §1.4.3 step 5). Independent of the outer retrieve/reflect budget
-#: (n_max / n_cap). Typical range: 2-5. Prevents infinite loops in CTC traversal.
-#: Used in retrieve_node and TraversalLimits.
-MAX_INNER_CTC_ITERATIONS = 3
+#: Re-exported from config/constants.py (the single source of truth for these
+#: defaults) so existing `from iterret.config import MAX_ACTIVE_CUES`-style
+#: call sites keep working.
+from config.constants import (  # noqa: E402
+    MAX_ACTIVE_CUES,
+    MAX_ACTIVE_TAGS,
+    MAX_INNER_CTC_ITERATIONS,
+    MAX_NEW_CONTENT_PER_ROUND,
+)
 
 
 @dataclass(frozen=True)
 class TraversalLimits:
-    """Active-set pruning configuration (COLM §1.4.3, Table 1).
+    """Active-set pruning configuration (closed-loop episode state management, Table 1).
 
     Frozen dataclass encapsulating all pruning limits for the IterRet closed
     loop. These limits ensure that retrieval remains deterministic, reproducible,
@@ -110,7 +91,7 @@ class TraversalLimits:
             expand (cues→tags), prune (semantic re-ranking), and load (content
             retrieval) steps. This limit caps how many times the loop cycles
             before returning control to the outer closed-loop controller
-            (COLM §1.4.3 step 5). Must be > 0.
+            (closed-loop episode state management step 5). Must be > 0.
 
     Example:
         >>> from iterret.config import TraversalLimits, MAX_ACTIVE_CUES
@@ -144,7 +125,7 @@ class TraversalLimits:
         MAX_INNER_CTC_ITERATIONS: Module-level constants used as defaults.
 
     References:
-        COLM §1.4.3, Table 1: Formal definitions and theoretical justification
+        closed-loop episode state management, Table 1: Formal definitions and theoretical justification
             for these pruning bounds in the context of MemR3 and IterRet.
     """
 

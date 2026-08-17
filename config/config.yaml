@@ -1,90 +1,53 @@
-# IterRet Hydra Configuration
-#
-# Single consolidated config file. All settings are defined here; no nested
-# composition needed. Override any leaf from the CLI, e.g.:
-#   python scripts/train.py llm.type=openai_compatible llm.base_url=http://localhost:8000
-#   python scripts/evaluate.py checkpoint.load_dir=/mnt/ssd/users/durgesh/iterret/runs/2026-08-01/12-00-00
+# IterRet Configuration — override CLI: python scripts/train.py llm.type=mock
 
-# ============================================================================
 # LLM Configuration
-# ============================================================================
 llm:
-  # Options: mock (deterministic, no network), openai_compatible (vLLM/LM Studio/Ollama)
-  type: mock
-
-  # OpenAI-compatible settings (used when type: openai_compatible)
-  base_url: null  # defaults to ITERRET_LLM_BASE_URL env var, then vLLM default
-  model: null     # defaults to ITERRET_LLM_MODEL env var, then openai/gpt-4
-  api_key: not-needed  # override via ITERRET_LLM_API_KEY in .env for hosted endpoints
+  type: openai_compatible  # mock | openai_compatible (vLLM/LM Studio/Ollama)
+  base_url: null           # env: ITERRET_LLM_BASE_URL; defaults to vLLM localhost:8000
+  model: null              # env: ITERRET_LLM_MODEL; defaults to gpt-4
+  api_key: not-needed      # env: ITERRET_LLM_API_KEY (for hosted endpoints)
   max_tokens: 1024
 
-# ============================================================================
-# Experiment Configuration
-# ============================================================================
-# Mirrors run_locomo_eval.py's argparse surface (kept as the CLI entry point
-# for one-off runs; scripts/train.py and scripts/evaluate.py are the
-# Hydra-managed equivalents that also add wandb + checkpoint plumbing).
+# Experiment Configuration (maps to run_locomo_eval.py args)
 experiment:
-  locomo_path: null  # null -> resolve_locomo_path's search order (see run_locomo_eval.py)
-  bootstrap_fraction: 0.1
-  max_iterations: 5  # iterret.state.DEFAULT_MAX_ITERATIONS
-  categories: [1, 2, 3, 4]  # DEFAULT_EVAL_CATEGORIES; 5 = adversarial, excluded by default
+  locomo_path: IterRet/data/locomo10.json  # LoCoMo dataset (null = auto-search)
+  bootstrap_fraction: 0.1                  # fraction of data for memory building
+  max_iterations: 5                        # DEFAULT_MAX_ITERATIONS from iterret.state
+  categories: [1, 2, 3, 4]                # eval categories (1-4 typical; 5 = adversarial)
   max_turns_per_conversation: null
-  max_chars_per_call: 4000  # memory_builder.DEFAULT_MAX_CHARS_PER_CALL
+  max_chars_per_call: 4000                # memory_builder.DEFAULT_MAX_CHARS_PER_CALL
   bootstrap_questions_per_conv: 10
   max_questions_per_conversation: null
   max_eval_conversations: null
   skip_llm_judge: false
   save_graphs_dir: null
 
-# ============================================================================
-# Logging Configuration
-# ============================================================================
-# Consumed by iterret.exp_logging.setup_logging / ExperimentLogger.
+# Logging Configuration (consumed by iterret.exp_logging.setup_logging)
 logging:
   console_level: INFO
   file_level: DEBUG
-  # Structured JSON-lines log; relative to Hydra's per-run output dir
-  # (hydra.run.dir / hydra.sweep.subdir) unless absolute.
   json_log_file: run.jsonl
 
-# ============================================================================
-# Checkpoint Configuration
-# ============================================================================
-# Consumed by iterret.experiment.CheckpointManager.
-#
-# Per docs/storage invariants (CLAUDE.md "Storage invariants"), checkpoint
-# artifacts (experience_bank.json, CTC graphs, run metadata) are large and
-# must live under /mnt/ssd/users/durgesh/, never /home. Override
-# checkpoint.root for other environments -- CheckpointManager never falls
-# back to a repo-relative path on its own.
+# Checkpoint Configuration (consumed by iterret.experiment.CheckpointManager)
 checkpoint:
   root: ${oc.env:ITERRET_CHECKPOINT_ROOT,/mnt/ssd/users/durgesh/iterret/checkpoints}
-  load_dir: null  # set to an existing run dir to resume/evaluate from a saved bank
-  save_every_n_conversations: 0  # 0 = only save once at the end of the bootstrap stage
+  load_dir: null              # load existing checkpoint to resume/evaluate
+  save_every_n_conversations: 0  # 0 = save only at bootstrap end
 
-# ============================================================================
 # Run Configuration
-# ============================================================================
-# Run identity. `run_name` is used as the wandb run name and the checkpoint
-# subdirectory name; leave null to let Hydra's job timestamp stand in.
-run_name: null
+run_name: null  # wandb run name & checkpoint dir; null = Hydra timestamp
 seed: 0
 
-# ============================================================================
 # WandB Configuration
-# ============================================================================
 wandb:
-  enabled: false  # flip on with `wandb.enabled=true`; requires WANDB_API_KEY
+  enabled: true  # requires WANDB_API_KEY in .env
   project: iterret
-  entity: ${oc.env:WANDB_ENTITY,null}  # defaults to the wandb-configured default entity
-  mode: online  # online | offline | disabled
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: online       # online | offline | disabled
   tags: []
   group: null
 
-# ============================================================================
 # Hydra Configuration
-# ============================================================================
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -92,4 +55,4 @@ hydra:
     dir: outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}_${hydra.job.override_dirname}
   job:
-    chdir: false  # keep CWD stable so relative dataset paths in locomo_data resolve
+    chdir: false

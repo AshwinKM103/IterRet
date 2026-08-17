@@ -10,13 +10,13 @@ import json
 import os
 from abc import ABC, abstractmethod
 
+from config.constants import DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_MODEL
+
 # Defaults match `vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000 ...`.
 # The "model" field in chat-completions requests MUST equal the name vLLM
 # reports at /v1/models (the full HF repo id, unless --served-model-name
 # was passed), so these are overridable via CLI flags or env vars rather
 # than hardcoded -- see resolve_llm_base_url / resolve_llm_model below.
-DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
-DEFAULT_LLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 ENV_LLM_BASE_URL = "ITERRET_LLM_BASE_URL"
 ENV_LLM_MODEL = "ITERRET_LLM_MODEL"
 
@@ -86,7 +86,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         base_url: str | None = None,
         model: str | None = None,
         api_key: str = "not-needed",
-        max_tokens: int = 1024,
+        max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
     ) -> None:
         """Initialize an OpenAI-compatible LLM client.
 
