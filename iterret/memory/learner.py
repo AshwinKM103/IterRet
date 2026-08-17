@@ -11,6 +11,7 @@ import json
 from ..models.llm_client import LLMClient
 from ..state import SearchStep
 from ..utils.json_utils import parse_json_object
+from ..utils.prompts import EXPERIENCE_DISTILLATION_SYSTEM_PROMPT
 from .experience_bank import ExperienceEntry, Module, planning_condition, reflection_condition
 
 _HIGH_QUALITY_FRAMING = (
@@ -21,21 +22,6 @@ _LOW_QUALITY_FRAMING = (
     "This step was judged LOW-quality. Extract a corrective experience so future "
     "steps avoid repeating this mistake."
 )
-
-_DISTILL_SYSTEM_PROMPT = """experience_distillation
-You are an AI TRACE Strategist/Auditor (R2-Mem style). {framing}
-Derive a GENERALIZABLE experience from this judged trajectory step. When
-`live_rubric_scores` is present (COLM per-dimension scores -- query
-specificity, evidence coverage, gap-gap redundancy -- captured live while
-the step actually ran), use it as additional signal for which aspect of the
-step most needs reinforcing (if scores are high) or correcting (if low);
-it is not a replacement for the 8-dimension rubric_evaluation judgment
-already given, only an extra, real-time-captured perspective on it. The
-output experience must follow the form: IF <abstract situation> THEN
-<strategy>. Do not copy concrete surface facts from the trace; treat the
-diagnosed evaluation reason as authoritative supervision.
-Reply as JSON: {{"situation": str, "experience": str}}.
-"""
 
 
 def distill_experience(
@@ -55,7 +41,7 @@ def distill_experience(
     already be told: ``situation`` and ``experience``.
     """
     framing = _HIGH_QUALITY_FRAMING if quality == "good" else _LOW_QUALITY_FRAMING
-    system_prompt = _DISTILL_SYSTEM_PROMPT.format(framing=framing)
+    system_prompt = EXPERIENCE_DISTILLATION_SYSTEM_PROMPT.format(framing=framing)
     user_prompt = json.dumps(
         {
             "module": module,

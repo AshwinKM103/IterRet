@@ -2,45 +2,58 @@
 
 Core memory system: experience banks, graph retrieval, and state management for IterRet's closed-loop memory reconstruction.
 
-## Overview
+## Architecture
 
-The memory module implements a two-tier memory architecture:
+**Experience Banks** (`experience_bank.py`)
 
-1. **Experience Banks** (`experience_bank.py`): Episodic stores of past retrieval decisions (Planning and Reflection experiences) indexed by condition and situation. Used to guide traversal via few-shot prompting during graph traversal.
+Episodic stores of past retrieval decisions (Planning and Reflection experiences) indexed by condition and situation. Used to guide traversal via few-shot prompting.
 
-2. **Graph Retrieval** (`nodes.py`): Implements the closed-loop controller (COLM §1.4.3):
-   - **`planning_node`**: Extracts query cues, refreshes active tags, selects traversal actions
-   - **`routing_node`** (alias `reflection_node`): Prunes/merges new content, judges gap resolution, proposes refined query
-   - **`answer_node`**: Synthesizes final answer from accumulated evidence
+**Graph Retrieval** (`nodes.py`)
 
-3. **Graph Structure** (`ctc_graph.py`, embedded): A Cue-Tag-Content memory graph where content retrieval is mediated by named cues (entities, predicates) → tags (relational patterns) → episodic/semantic/topic layers.
+Implements the closed-loop controller:
+
+- `planning_node`: Extract query cues, refresh active tags, select traversal actions
+- `routing_node` (alias `reflection_node`): Prune/merge content, judge gap resolution, propose refined query
+- `answer_node`: Synthesize final answer from accumulated evidence
+
+**Graph Structure** (`ctc_graph.py`)
+
+Cue-Tag-Content memory graph where content retrieval is mediated by:
+
+- Cues (entities, predicates)
+- Tags (relational patterns)
+- Content layers (episodic/semantic/topic)
 
 ## Key Classes
 
-- **`ExperienceBank`**: Holds Planning and Reflection experience entries. Supports retrieval by semantic similarity (pluggable embedding backend: SentenceTransformer or keyword-overlap fallback).
-- **`EmbeddingBackend`**: Abstract interface for embedding strategies (used by ExperienceBank for experience retrieval).
-- **`IterRetState` (in `state.py`)**: TypedDict holding the full closed-loop state: accumulated evidence, gaps, active set, search trajectory, iteration count.
-- **`CueTagContentGraph`** (in `data/`): Graph structure and traversal operators (cue→tag, tag→content, content→cue+tag).
+- **`ExperienceBank`**: Holds Planning/Reflection entries. Supports retrieval by semantic similarity (pluggable embedding backend).
+- **`EmbeddingBackend`**: Abstract interface for embedding strategies.
+- **`IterRetState`**: Full closed-loop state (evidence, gaps, active set, trajectory, iteration count).
+- **`CueTagContentGraph`**: Graph structure and traversal operators.
 
 ## Main Functions
 
-- **`planning_node(state, graph, llm, bank, limits)`**: Step 1 (COLM §1.4.3): extract cues, activate tags, select traversal actions.
-- **`routing_node(state, graph, llm, bank, limits)`**: Step 2 (COLM §1.4.3): prune/merge content into evidence, update gaps, refine query.
-- **`answer_node(state, llm)`**: Synthesize final answer from accumulated evidence.
-- **`evaluate_conversation(state, llm, ...)`**: Run one full closed-loop episode: initialize state, loop plan→retrieve→reflect until answer or max iterations reached.
+- `planning_node(state, graph, llm, bank, limits)`: Step 1 — extract cues, activate tags, select actions
+- `routing_node(state, graph, llm, bank, limits)`: Step 2 — prune/merge content, update gaps, refine query
+- `answer_node(state, llm)`: Synthesize final answer
+- `evaluate_conversation(state, llm, ...)`: Run one full episode until answer or max iterations
 
 ## Data Flow
 
-1. **Offline phase** (`scripts/train.py`): Build experience bank from bootstrap trajectories, checkpoint to JSON.
-2. **Online phase** (`scripts/evaluate.py`, `run_locomo_eval.py`): Load bank + graph, run closed-loop episodes.
-3. **Within a loop iteration**:
-   - Planning: extract cues, activate tags from graph, retrieve Planning experiences
-   - Retrieve: follow active traversal actions (cue→tag, tag→content, etc.)
-   - Route/Reflect: merge new content, retrieve Reflection experiences, judge gaps, refine query or answer
+```
+Offline (scripts/train.py):
+  Bootstrap trajectories → Build experience bank → Checkpoint to JSON
+
+Online (scripts/evaluate.py):
+  Load bank + graph → Run closed-loop episodes
+
+Per iteration:
+  Planning → Retrieve → Route/Reflect → Answer or refine
+```
 
 ## Dependencies
 
-- `iterret.data.ctc_graph`: CueTagContentGraph for traversal
-- `iterret.models.llm_client`: LLMClient for condition abstraction, action selection, routing
-- `iterret.state`: IterRetState, SearchStep types
-- `sentence-transformers` (optional): For neural embedding backend in ExperienceBank
+- `iterret.data.ctc_graph`: Graph traversal
+- `iterret.models.llm_client`: LLM for extraction and routing
+- `iterret.state`: State and trajectory types
+- `sentence-transformers` (optional): Neural embedding backend

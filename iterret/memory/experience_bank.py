@@ -11,7 +11,7 @@ import math
 from abc import ABC, abstractmethod
 from typing import Literal, TypedDict
 
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+from config.constants import DEFAULT_EMBEDDING_MODEL
 
 Module = Literal["Planning", "Reflection"]
 

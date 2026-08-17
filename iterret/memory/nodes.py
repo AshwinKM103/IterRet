@@ -1,6 +1,6 @@
 """Closed-loop nodes: planning, retrieval, routing, and answer synthesis.
 
-Implements the four steps of COLM §1.4.3: planning_node, retrieve_node,
+Implements the four steps of closed-loop episode state management: planning_node, retrieve_node,
 routing_node (reflection), and answer_node, orchestrated by LanggraphGraphBuilder.
 """
 
@@ -14,75 +14,29 @@ from ..data.ctc_graph import CueTagContentGraph
 from ..models.llm_client import LLMClient
 from ..state import DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_STUCK_REFLECTS, IterRetState, SearchStep
 from ..utils.json_utils import parse_json_object
+from ..utils.prompts import (
+    ACTION_SELECTION_SYSTEM_PROMPT,
+    CUE_EXTRACTION_SYSTEM_PROMPT,
+    FINAL_ANSWER_SYSTEM_PROMPT,
+    ROUTER_DECISION_SYSTEM_PROMPT,
+    ROUTING_AND_REFLECTION_SYSTEM_PROMPT,
+    SITUATION_SYSTEM_PROMPT,
+)
 from .evidence_tracker import EvidenceTracker
 from .experience_bank import ExperienceBank, planning_condition, reflection_condition
 from .live_rubric import score_reflect_step
 
-_SITUATION_SYSTEM_PROMPT = """situation_abstraction
-Abstract the given condition into a short, general situation description
-(no concrete entity names), so it can be matched against past experience.
-Reply as JSON: {"situation": str}.
-"""
-
-_ACTION_SELECTION_SYSTEM_PROMPT = """action_selection
-You control traversal over a Cue-Tag-Content memory graph (MRAgent style).
-Given the query, the current active set, any retrieved Planning experience
-advice, and the current information_gaps (G), choose which traversal
-action(s) to take this round: "cue_to_tag", "tag_to_content", and/or
-"content_to_cue_tag". Also list any tags that should be excluded --
-"exclude_tags" is how paths get pruned BEFORE their content is loaded, so
-exclude any tag whose likely content is inconsistent with (i.e. unlikely to
-help resolve) information_gaps, not just tags the experience advice warns
-against.
-In most rounds you should select BOTH "cue_to_tag" AND "tag_to_content"
-together: activating tags without then fetching the content behind them
-makes no progress and wastes a round. The active_set's tags/cues are
-already ordered with the most relevant ones first, so it is normal (and
-expected) for later entries to look unrelated -- do not let that stop you
-from selecting "tag_to_content" once any clearly relevant tag is present.
-Only select "cue_to_tag" alone if there are currently no tags at all yet.
-Reply as JSON: {"actions": [str, ...], "exclude_tags": [str, ...]}.
-"""
-
-_CUE_EXTRACTION_SYSTEM_PROMPT = """cue_extraction
-Given the current query, the evidence gathered so far, and the remaining
-information gaps, extract retrieval cue terms -- named entities, time
-expressions, and causal predicates -- worth indexing into a Cue-Tag-Content
-memory graph for the NEXT retrieval round. Prioritize terms tied to the
-unresolved gaps, not just the original query text.
-Reply as JSON: {"cues": [str, ...]}.
-"""
-
-_ROUTING_SYSTEM_PROMPT = """routing_and_reflection
-You perform f_route (prune/merge newly retrieved content into evidence)
-and f_reflect (judge whether gaps remain and propose a refined query) for
-an active memory reconstruction loop (MRAgent + MemR3 style), informed by
-retrieved Reflection experience advice.
-"new_content" is a list of {"id": str, "text": str} objects -- each "id"
-is that item's unique content id. "kept_content_ids" MUST be either the
-literal string "ALL", or a list containing only those "id" values for the
-items worth keeping as evidence (never the "text" itself, and never an id
-that isn't in "new_content").
-Reply as JSON: {"kept_content_ids": "ALL" or [str, ...], "resolved_gaps": [str, ...],
-"new_gaps": [str, ...], "next_query": str}.
-"""
-
-_ANSWER_SYSTEM_PROMPT = """final_answer
-Synthesize a final answer to the question using ONLY the provided evidence
-bullets. Do not reference gaps, search trajectory, or graph internals.
-"""
-
 
 def abstract_situation(condition: str, llm: LLMClient) -> str:
     """LLM_sigma(c_i): abstracts a condition into a matchable situation (R2-Mem Eq. 11)."""
-    raw = llm.chat(_SITUATION_SYSTEM_PROMPT, json.dumps({"condition": condition}))
+    raw = llm.chat(SITUATION_SYSTEM_PROMPT, json.dumps({"condition": condition}))
     return parse_json_object(raw).get("situation") or condition
 
 
 def extract_cue_terms(
     query: str, evidence: list[str], gaps: list[str], llm: LLMClient
 ) -> list[str]:
-    """LLM-based cue extraction (COLM §1.4.3 step 1), re-run every retrieval
+    """LLM-based cue extraction (closed-loop episode state management step 1), re-run every retrieval
     round against the current (E, G) state rather than the query alone.
     Mirrors MRAgent's `extract_question_keys` (agent/agent.py:566-572). The
     returned terms are matched against the graph's actual cue ids by the
@@ -92,7 +46,7 @@ def extract_cue_terms(
     directly as cue ids.
     """
     raw = llm.chat(
-        _CUE_EXTRACTION_SYSTEM_PROMPT,
+        CUE_EXTRACTION_SYSTEM_PROMPT,
         json.dumps({"query": query, "evidence": evidence, "gaps": gaps}),
     )
     parsed = parse_json_object(raw)
@@ -111,7 +65,7 @@ def _refresh_active_cues(
     limits: TraversalLimits,
     active_set: dict[str, list[str]],
 ) -> None:
-    """CTC Step 1 (COLM §1.4.3 step 1): re-derive retrieval cues from the
+    """CTC Step 1 (closed-loop episode state management step 1): re-derive retrieval cues from the
     current evidence-gap state (E, G) every round -- not a one-shot,
     query-only match. Newly-matched cues are UNIONed with cues already in
     the active set (not reset), so cues discovered in earlier rounds are
@@ -142,7 +96,7 @@ def _select_traversal_actions(
             "information_gaps": gaps,
         }
     )
-    raw = llm.chat(_ACTION_SELECTION_SYSTEM_PROMPT, selection_prompt)
+    raw = llm.chat(ACTION_SELECTION_SYSTEM_PROMPT, selection_prompt)
     parsed = parse_json_object(raw)
     actions = parsed.get("actions") or ["cue_to_tag", "tag_to_content"]
     exclude_tags = set(parsed.get("exclude_tags", []))
@@ -156,7 +110,7 @@ def _expand_tags(
     query: str,
     limits: TraversalLimits,
 ) -> set[str]:
-    """CTC Step 2 (COLM §1.4.3 step 2): tag-guided expansion -- read the
+    """CTC Step 2 (closed-loop episode state management step 2): tag-guided expansion -- read the
     tags of neighboring cues and select the promising next hops."""
     tags = set(active_set["tags"])
     if "cue_to_tag" in actions:
@@ -167,7 +121,7 @@ def _expand_tags(
 
 
 def _prune_tags_by_gap(tags: set[str], exclude_tags: set[str]) -> list[str]:
-    """CTC Step 4 (COLM §1.4.3 step 4): prune hops whose tags are
+    """CTC Step 4 (closed-loop episode state management step 4): prune hops whose tags are
     inconsistent with the current information gap G, BEFORE their content
     is loaded. `exclude_tags` was decided gap-aware by
     `_select_traversal_actions` above; this is the deterministic
@@ -187,7 +141,7 @@ def _load_content(
     query: str,
     limits: TraversalLimits,
 ) -> set[str]:
-    """CTC Step 3 (COLM §1.4.3 step 3): load the full content of the
+    """CTC Step 3 (closed-loop episode state management step 3): load the full content of the
     pruned, surviving hops and append it to this round's candidate pool."""
     if "tag_to_content" not in actions:
         return set()
@@ -233,7 +187,7 @@ def retrieve_node(
     llm: LLMClient,
     limits: TraversalLimits | None = None,
 ) -> IterRetState:
-    """The CTC traversal (COLM §1.4.3): 5 distinguishable steps --
+    """The CTC traversal (closed-loop episode state management): 5 distinguishable steps --
     (1) cue extraction, (2) tag-guided expansion, (3) content loading,
     (4) gap-conditioned pruning (before loading), (5) evidence-triggered
     stopping -- run as their own inner loop, returning control to the
@@ -344,7 +298,7 @@ def reflect_node(
             "reflection_advice": advice_text,
         }
     )
-    raw = llm.chat(_ROUTING_SYSTEM_PROMPT, routing_prompt)
+    raw = llm.chat(ROUTING_AND_REFLECTION_SYSTEM_PROMPT, routing_prompt)
     parsed = parse_json_object(raw)
 
     kept = parsed.get("kept_content_ids", "ALL")
@@ -396,21 +350,6 @@ def reflect_node(
     return state
 
 
-_ROUTER_DECISION_SYSTEM_PROMPT = """router_decision
-You are the routing decision maker in an active memory reconstruction loop.
-Given the current query, accumulated evidence, information gaps, iteration budget,
-and any retrieved experience_advice (known high-quality behaviors and known
-failure modes from past trajectories), decide whether to retrieve more evidence
-or answer now with what's available. Let experience_advice bias your decision
-when it directly speaks to a situation like this one.
-
-Choose "retrieve" if the gaps are worth chasing further given the iteration budget.
-Choose "answer" if you judge the current evidence is sufficient or the gaps are less important.
-
-Reply as JSON: {"action": "retrieve" | "answer", "reasoning": "..."}.
-"""
-
-
 def router_node(
     state: IterRetState, llm: LLMClient, bank: ExperienceBank | None = None
 ) -> IterRetState:
@@ -418,7 +357,7 @@ def router_node(
     ask the LLM whether to retrieve again or answer now. Hard-stop conditions
     (iteration budget, empty gaps, consecutive stuck reflects) always override.
 
-    When ``bank`` is provided, Reflection experience advice (COLM §1.4.2:
+    When ``bank`` is provided, Reflection experience advice (retrieval quality rubric:
     known high-quality behaviors and known failure modes should bias "the
     router's context") is retrieved and injected into the LLM decision
     prompt -- the same `bank.retrieve(...)` call pattern used by
@@ -464,7 +403,7 @@ def router_node(
                 "experience_advice": advice_text,
             }
         )
-        raw = llm.chat(_ROUTER_DECISION_SYSTEM_PROMPT, router_prompt)
+        raw = llm.chat(ROUTER_DECISION_SYSTEM_PROMPT, router_prompt)
         parsed = parse_json_object(raw)
         decision = parsed.get("action", "retrieve")
         if decision not in ("retrieve", "answer"):
@@ -489,7 +428,7 @@ def route_after_reflect(state: IterRetState) -> Literal["retrieve", "answer"]:
 def answer_node(state: IterRetState, llm: LLMClient) -> IterRetState:
     evidence_block = "\n".join(f"- {item}" for item in state.get("accumulated_evidence", []))
     user_prompt = f"Question: {state['original_query']}\nEvidence:\n{evidence_block}"
-    state["final_answer"] = llm.chat(_ANSWER_SYSTEM_PROMPT, user_prompt)
+    state["final_answer"] = llm.chat(FINAL_ANSWER_SYSTEM_PROMPT, user_prompt)
 
     trajectory = state.setdefault("search_trajectory", [])
     trajectory.append(

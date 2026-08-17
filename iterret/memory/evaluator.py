@@ -1,17 +1,19 @@
 """Rubric-based evaluation of closed-loop steps.
 
-Defines Planning and Reflection rubrics (COLM §1.4.2) and evaluates
+Defines Planning and Reflection rubrics (retrieval quality rubric) and evaluates
 individual steps via LLM judgment.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, cast
+from typing import Literal
 
 from ..models.llm_client import LLMClient
 from ..state import SearchStep
 from ..utils.json_utils import parse_json_object
+from ..utils.metrics import sum_rubric_scores
+from ..utils.prompts import RUBRIC_EVALUATOR_SYSTEM_PROMPT
 
 PLANNING_RUBRICS = [
     "Info Needs Coverage",
@@ -34,27 +36,9 @@ LOW_THRESHOLD = (
 
 Quality = Literal["good", "bad", "discard"]
 
-_EVALUATOR_SYSTEM_PROMPT = """rubric_evaluation
-You are an expert evaluator for an AI memory deep search system (R2-Mem style).
-Score the given step against its module's rubric dimensions, 0-3 points
-each, and give a short reason plus actionable advice for future steps.
-Reply as JSON: {"module": str, "rubrics": {<dimension>: int, ...}, "reason_and_advice": str}.
-"""
-
 
 def _rubrics_for(module: str) -> list[str]:
     return PLANNING_RUBRICS if module == "Planning" else REFLECTION_RUBRICS
-
-
-def _sum_rubric_scores(rubrics: dict[str, object], dimensions: list[str]) -> int:
-    total = 0
-    for dimension in dimensions:
-        try:
-            value = rubrics.get(dimension, 0)
-            total += int(cast(Any, value))
-        except (TypeError, ValueError):
-            continue
-    return total
 
 
 def score_step(step: SearchStep, llm: LLMClient) -> tuple[int, str]:
@@ -76,12 +60,12 @@ def score_step(step: SearchStep, llm: LLMClient) -> tuple[int, str]:
             "decision": step["decision"],
         }
     )
-    raw = llm.chat(_EVALUATOR_SYSTEM_PROMPT, user_prompt)
+    raw = llm.chat(RUBRIC_EVALUATOR_SYSTEM_PROMPT, user_prompt)
     parsed = parse_json_object(raw)
     rubrics = parsed.get("rubrics", {})
     if not isinstance(rubrics, dict):
         rubrics = {}
-    total_score = _sum_rubric_scores(rubrics, dimensions)
+    total_score = sum_rubric_scores(rubrics, dimensions)
     reason_and_advice = str(
         parsed.get("reason_and_advice", "") or ("unparseable evaluator reply" if not parsed else "")
     )

@@ -6,7 +6,7 @@ from __future__ import annotations
 class EvidenceTracker:
     """Tracks accumulated evidence and information gaps during closed-loop retrieval.
 
-    COLM §1: Maintains E_k (accumulated_evidence) and G_k (information_gaps)
+    closed-loop memory retrieval §1: Maintains E_k (accumulated_evidence) and G_k (information_gaps)
     across iteration rounds. Evidence is appended incrementally; gaps are
     resolved (removed) and new gaps discovered as retrieval progresses.
 

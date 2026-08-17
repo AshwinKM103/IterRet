@@ -8,17 +8,22 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from config.constants import (
+    DEFAULT_MAX_ITERATIONS,
+    DEFAULT_MAX_STUCK_REFLECTS,  # noqa: F401 -- re-exported for callers
+)
+
 
 class SearchStep(TypedDict):
-    """One step in the search trajectory (COLM §1.4.3).
+    """One step in the closed-loop search trajectory.
 
-    Records a single iteration of the closed-loop reasoning process: the module
+    Records a single iteration of the memory retrieval process: the module
     that executed (planning or reflection), the query used, the retrieval action,
     what was discovered, the router's decision, and quality judgments. Each
     SearchStep is appended to search_trajectory in IterRetState, forming a
     complete trace of the episode for visualization, debugging, and evaluation.
 
-    This type is used to build a detailed audit log of the closed loop,
+    This type is used to build a detailed audit log of the reasoning loop,
     enabling analysis of decision quality and retrieval effectiveness.
 
     Attributes:
@@ -41,7 +46,7 @@ class SearchStep(TypedDict):
             - "retrieve": Proceed to another retrieval iteration.
             - "reflect": Perform reflection and gap analysis.
             - "answer": Proceed to answer synthesis.
-        rubric_scores: Per-dimension quality scores from COLM §1.4.2 rubric.
+        rubric_scores: Per-dimension quality scores for the retrieval step.
             Dict maps dimension names (e.g., "relevance", "clarity", "coherence")
             to integer scores. Used to track quality of retrieved evidence.
             Example: {"relevance": 3, "clarity": 2, "coherence": 3}.
@@ -67,11 +72,13 @@ class SearchStep(TypedDict):
     action_taken: str
     found_summary: str
     decision: str  # "retrieve" | "reflect" | "answer"
-    rubric_scores: dict[str, int]  # per-dimension COLM rubric scores (COLM §1.4.2)
+    rubric_scores: dict[
+        str, int
+    ]  # per-dimension closed-loop memory retrieval rubric scores (retrieval quality rubric)
 
 
 class IterRetState(TypedDict, total=False):
-    r"""Full state of a closed-loop memory reconstruction episode (COLM §1.4.3).
+    r"""Full state of a closed-loop memory reconstruction episode (closed-loop episode state management).
 
     Tracks the entire state of one memory retrieval episode: the original query,
     accumulated evidence, information gaps, the active retrieval frontier, visited
@@ -83,7 +90,7 @@ class IterRetState(TypedDict, total=False):
     intermediate states where not all fields have been populated yet. All fields
     should be present by episode completion.
 
-    State invariants (see COLM §1.4.3 for formal definitions):
+    State invariants (see closed-loop episode state management for formal definitions):
     - original_query (q): Never changes.
     - current_refined_query (q^ret_k): May be refined by Reflection steps per MemR3 Eq. 5.
     - accumulated_evidence (E_k / H^(t)): Monotonically grows; never shrinks.
@@ -119,7 +126,7 @@ class IterRetState(TypedDict, total=False):
             episode for visualization and analysis.
         iteration_count: Current iteration number (0-indexed). Incremented after
             each Planning/Reflection pair. Used to check termination conditions.
-        max_iterations: Maximum iterations allowed (n_max; COLM §1.4.3, typically 5).
+        max_iterations: Maximum iterations allowed (n_max; closed-loop episode state management, typically 5).
             Episode terminates when iteration_count >= max_iterations.
         consecutive_stuck_reflects: Count of consecutive Reflection steps with no
             gap reduction (toward n_cap; typically 2). Triggers early exit if
@@ -174,10 +181,6 @@ class IterRetState(TypedDict, total=False):
     _router_decision: Literal["retrieve", "answer"]  # routing decision made by router_node
 
 
-DEFAULT_MAX_ITERATIONS = 5  # n_max, MemR3 main config
-DEFAULT_MAX_STUCK_REFLECTS = 2  # n_cap
-
-
 def new_state(original_query: str, *, max_iterations: int = DEFAULT_MAX_ITERATIONS) -> IterRetState:
     """Initialize a fresh episode state for a new query.
 
@@ -201,7 +204,7 @@ def new_state(original_query: str, *, max_iterations: int = DEFAULT_MAX_ITERATIO
             serves as the baseline query throughout the episode. Examples:
             "What is transformer attention?", "How does photosynthesis work?".
         max_iterations: Maximum iterations for the closed-loop reasoning (n_max;
-            COLM §1.4.3, Table 1). Default 5. Controls early termination if
+            closed-loop episode state management, Table 1). Default 5. Controls early termination if
             iteration_count reaches this limit before convergence.
 
     Returns:
