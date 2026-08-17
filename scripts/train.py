@@ -9,9 +9,9 @@ against the held-out slice is `scripts/evaluate.py`, kept separate so a
 bank can be evaluated repeatedly (different categories, different judge
 settings) without rebuilding it.
 
-Equivalent to run_locomo_eval.py's `build_offline_memory` call, but driven
-by Hydra config instead of argparse, and checkpointed instead of only kept
-in memory for the immediate eval that follows it.
+Equivalent to calling `build_offline_memory` directly, but driven by Hydra
+config instead of argparse, and checkpointed instead of only kept in memory
+for the immediate eval that follows it.
 
 Usage:
     python scripts/train.py
@@ -34,15 +34,20 @@ load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"
 )  # populates WANDB_*, ITERRET_* before Hydra resolves oc.env
 
-from iterret.data.locomo_data import load_raw_locomo, split_bootstrap_eval  # noqa: E402
+from config.constants import DEFAULT_LLM_MAX_TOKENS  # noqa: E402
+from iterret.data.locomo_data import (  # noqa: E402
+    load_raw_locomo,
+    resolve_locomo_path,
+    split_bootstrap_eval,
+)
 from iterret.experiment import CheckpointManager  # noqa: E402
 from iterret.experiment.exp_logging import ExperimentLogger, setup_logging  # noqa: E402
+from iterret.memory.offline_pipeline import build_offline_memory  # noqa: E402
 from iterret.models.llm_client import (  # noqa: E402
     LLMClient,
     MockLLMClient,
     OpenAICompatibleLLMClient,
 )
-from run_locomo_eval import build_offline_memory, resolve_locomo_path  # noqa: E402
 
 
 def build_llm_client(llm_cfg: DictConfig) -> LLMClient:
@@ -53,7 +58,7 @@ def build_llm_client(llm_cfg: DictConfig) -> LLMClient:
             base_url=llm_cfg.get("base_url"),
             model=llm_cfg.get("model"),
             api_key=llm_cfg.get("api_key", "not-needed"),
-            max_tokens=llm_cfg.get("max_tokens", 1024),
+            max_tokens=llm_cfg.get("max_tokens", DEFAULT_LLM_MAX_TOKENS),
         )
     raise ValueError(f"Unknown llm.type '{llm_cfg.type}' (expected 'mock' or 'openai_compatible')")
 

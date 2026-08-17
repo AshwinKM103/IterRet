@@ -3,9 +3,9 @@ against the held-out LoCoMo slice, log per-category metrics.
 
 Two modes, chosen by whether `checkpoint.load_dir` is set:
   - set:   load a bank checkpointed by scripts/train.py, evaluate only.
-  - unset: build the bank in-process first (same as run_locomo_eval.py's
-           single-shot bootstrap+eval), then evaluate -- convenient for
-           quick iteration without a separate train step.
+  - unset: build the bank in-process first (single-shot bootstrap+eval),
+           then evaluate -- convenient for quick iteration without a
+           separate train step.
 
 Usage:
     python scripts/evaluate.py \
@@ -29,10 +29,11 @@ load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"
 )  # populates WANDB_*, ITERRET_* before Hydra resolves oc.env
 
+from config.constants import CATEGORY_NAMES  # noqa: E402
 from iterret.data.locomo_data import (  # noqa: E402
-    CATEGORY_NAMES,
     load_raw_locomo,
     parse_conversation,
+    resolve_locomo_path,
     split_bootstrap_eval,
 )
 from iterret.data.memory_builder import build_ctc_graph_from_dialogue  # noqa: E402
@@ -42,11 +43,10 @@ from iterret.memory.experience_bank import (  # noqa: E402
     ExperienceBank,
     build_default_embedding_backend,
 )
-from run_locomo_eval import (  # noqa: E402
+from iterret.memory.offline_pipeline import (  # noqa: E402
     build_offline_memory,
     evaluate_conversation,
     print_results_table,
-    resolve_locomo_path,
 )
 
 from scripts.train import build_llm_client, resolve_run_name  # noqa: E402

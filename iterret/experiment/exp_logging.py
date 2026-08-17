@@ -1,3 +1,12 @@
+from __future__ import annotations
+import json
+import logging
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
 """Experiment logging: console + file + structured JSON + optional wandb.
 
 Named `exp_logging` rather than `logging` deliberately -- every other module
@@ -17,15 +26,7 @@ Two independent concerns live in this module:
     stdlib logger above, so scripts never need an `if wandb:` branch.
 """
 
-from __future__ import annotations
 
-import json
-import logging
-import sys
-import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 
 class JsonLinesHandler(logging.Handler):

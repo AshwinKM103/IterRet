@@ -14,6 +14,8 @@ Usage:
 
 from __future__ import annotations
 
+from iterret.utils.logger import get_logger
+
 import argparse
 import subprocess
 import sys
